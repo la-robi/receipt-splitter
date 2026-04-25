@@ -5,6 +5,7 @@ const fs = require('fs/promises');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
 const Tesseract = require('tesseract.js');
+const sharp = require('sharp');
 const { version: appVersion } = require('./package.json');
 
 const app = express();
@@ -269,6 +270,21 @@ async function runOcrWithFallback(imageBuffer) {
   throw lastError || new Error('OCR fallito senza dettagli aggiuntivi.');
 }
 
+async function rotateImage90Counterclockwise(imageBuffer, steps = 1) {
+  const normalizedSteps = ((steps % 4) + 4) % 4;
+  if (normalizedSteps === 0) return imageBuffer;
+
+  const degrees = normalizedSteps * -90;
+  return sharp(imageBuffer).rotate(degrees).toBuffer();
+}
+
+async function sanitizeImageForOcr(imageBuffer) {
+  return sharp(imageBuffer)
+    .rotate()
+    .png()
+    .toBuffer();
+}
+
 app.get('/api/meta', (_req, res) => {
   return res.json({
     appVersion,
@@ -282,8 +298,51 @@ app.post('/api/ocr', upload.single('receipt'), async (req, res) => {
   }
 
   try {
-    const ocrResult = await runOcrWithFallback(req.file.buffer);
-    const parsed = parseReceiptText(ocrResult.text);
+    const sanitizedImage = await sanitizeImageForOcr(req.file.buffer);
+    const rotationAttempts = [
+      { steps: 0, label: 'originale' },
+      { steps: 1, label: 'rotata 90° antiorario' },
+      { steps: 2, label: 'rotata 180°' },
+      { steps: 3, label: 'rotata 270° antiorario' }
+    ];
+    const orientationFailures = [];
+
+    let ocrResult = null;
+    let parsed = [];
+    let usedRotation = rotationAttempts[0];
+
+    for (const rotation of rotationAttempts) {
+      try {
+        const candidateImage = await rotateImage90Counterclockwise(sanitizedImage, rotation.steps);
+        const candidateOcr = await runOcrWithFallback(candidateImage);
+        const candidateParsed = parseReceiptText(candidateOcr.text);
+
+        if (candidateParsed.length > 0) {
+          ocrResult = candidateOcr;
+          parsed = candidateParsed;
+          usedRotation = rotation;
+          break;
+        }
+
+        orientationFailures.push({
+          rotation: rotation.label,
+          message: 'Nessuna riga articolo+prezzo riconosciuta'
+        });
+      } catch (error) {
+        orientationFailures.push({
+          rotation: rotation.label,
+          message: error?.message || 'Errore OCR non specificato',
+          failures: error?.ocrFailures || []
+        });
+      }
+    }
+
+    if (!ocrResult) {
+      const error = new Error('Nessuna riga riconosciuta dopo 4 orientamenti (0°, 90°, 180°, 270°).');
+      error.orientationFailures = orientationFailures;
+      throw error;
+    }
+
     const memory = await readJson(MEMORY_FILE, {});
 
     const withSuggestions = parsed.map((item) => ({
@@ -295,9 +354,11 @@ app.post('/api/ocr', upload.single('receipt'), async (req, res) => {
       text: ocrResult.text,
       items: withSuggestions,
       usedLanguage: ocrResult.usedLanguage,
+      usedRotation: usedRotation.label,
       warning: ocrResult.usedFallback
         ? `OCR in fallback con lingua ${ocrResult.usedLanguage}.`
-        : null
+        : null,
+      info: usedRotation.steps > 0 ? `OCR riuscito con immagine ${usedRotation.label}.` : null
     });
   } catch (error) {
     const requestId = `ocr-${Date.now()}`;
@@ -311,7 +372,8 @@ app.post('/api/ocr', upload.single('receipt'), async (req, res) => {
         name: error?.name || 'Error',
         message: error?.message || 'Errore OCR non specificato',
         stack: error?.stack || null,
-        failures: error?.ocrFailures || []
+        failures: error?.ocrFailures || [],
+        orientationFailures: error?.orientationFailures || []
       }
     });
   }

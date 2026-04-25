@@ -89,6 +89,20 @@ function setOcrDebug(debugPayload) {
   els.ocrDebugDetails.open = true;
 }
 
+async function parseJsonResponseSafe(response) {
+  const rawBody = await response.text();
+  if (!rawBody) return null;
+
+  try {
+    return JSON.parse(rawBody);
+  } catch (error) {
+    return {
+      parseError: error.message,
+      rawBody
+    };
+  }
+}
+
 async function loadAppMeta() {
   try {
     const response = await fetch('/api/meta');
@@ -173,27 +187,44 @@ async function extractReceipt() {
       method: 'POST',
       body: form
     });
-    const data = await response.json();
+    const data = await parseJsonResponseSafe(response);
 
     if (!response.ok) {
-      const message = data.error || 'OCR non riuscito.';
+      const message = data?.error || `OCR non riuscito (HTTP ${response.status}).`;
       const debugPayload = {
-        requestId: data.requestId || null,
-        details: data.details || null,
-        debug: data.debug || null
+        requestId: data?.requestId || null,
+        status: response.status,
+        statusText: response.statusText,
+        details: data?.details || null,
+        debug: data?.debug || null,
+        rawResponseBody: data?.rawBody || null,
+        parseError: data?.parseError || null
       };
       const error = new Error(message);
       error.debugPayload = debugPayload;
       throw error;
     }
 
-    state.items = data.items.length
-      ? data.items.map((it) => ({ ...it, id: crypto.randomUUID() }))
+    if (!data || typeof data !== 'object') {
+      const error = new Error('Risposta OCR vuota o non valida.');
+      error.debugPayload = {
+        status: response.status,
+        statusText: response.statusText,
+        body: data
+      };
+      throw error;
+    }
+
+    const extractedItems = Array.isArray(data.items) ? data.items : [];
+
+    state.items = extractedItems.length
+      ? extractedItems.map((it) => ({ ...it, id: crypto.randomUUID() }))
       : [{ id: crypto.randomUUID(), name: '', price: 0, owner: 'both' }];
 
-    const extra = data.warning ? ` (${data.warning})` : '';
-    const hint = data.items.length === 0 ? ' Prova a rifare la foto più dritta e vicina agli item.' : '';
-    setStatus(`Righe estratte: ${data.items.length}. Correggi se necessario.${extra}${hint}`);
+    const extraParts = [data.warning, data.info].filter(Boolean);
+    const extra = extraParts.length > 0 ? ` (${extraParts.join(' ')})` : '';
+    const hint = extractedItems.length === 0 ? ' Prova a rifare la foto più dritta e vicina agli item.' : '';
+    setStatus(`Righe estratte: ${extractedItems.length}. Correggi se necessario.${extra}${hint}`);
     renderItems();
   } catch (error) {
     setOcrDebug(error.debugPayload || { message: error.message });
