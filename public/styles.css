@@ -29,6 +29,11 @@ h1 {
   margin-bottom: 4px;
 }
 
+h1 .muted {
+  font-size: 0.9rem;
+  font-weight: 500;
+}
+
 .subtitle {
   margin-top: 0;
   color: var(--muted);
@@ -129,4 +134,21 @@ button.secondary {
 
 .footer-actions button {
   margin-top: 0;
+}
+
+#ocrDebugDetails {
+  margin-top: 10px;
+}
+
+#ocrDebugOutput {
+  margin: 8px 0 0;
+  padding: 10px;
+  background: #f8fafc;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 240px;
+  overflow: auto;
+  font-size: 0.85rem;
 }

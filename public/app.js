@@ -7,6 +7,9 @@ const els = {
   receiptImage: document.getElementById('receiptImage'),
   extractBtn: document.getElementById('extractBtn'),
   status: document.getElementById('status'),
+  appVersion: document.getElementById('appVersion'),
+  ocrDebugDetails: document.getElementById('ocrDebugDetails'),
+  ocrDebugOutput: document.getElementById('ocrDebugOutput'),
   itemsList: document.getElementById('itemsList'),
   itemTemplate: document.getElementById('itemTemplate'),
   addItemBtn: document.getElementById('addItemBtn'),
@@ -75,6 +78,30 @@ function setStatus(message) {
   els.status.textContent = message;
 }
 
+function setOcrDebug(debugPayload) {
+  if (!debugPayload) {
+    els.ocrDebugOutput.textContent = '';
+    els.ocrDebugDetails.open = false;
+    return;
+  }
+
+  els.ocrDebugOutput.textContent = JSON.stringify(debugPayload, null, 2);
+  els.ocrDebugDetails.open = true;
+}
+
+async function loadAppMeta() {
+  try {
+    const response = await fetch('/api/meta');
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error('meta endpoint non disponibile');
+    }
+    els.appVersion.textContent = `v${data.appVersion} · build ${data.buildId}`;
+  } catch (_error) {
+    els.appVersion.textContent = 'versione non disponibile';
+  }
+}
+
 function renderItems() {
   els.itemsList.innerHTML = '';
 
@@ -138,6 +165,7 @@ async function extractReceipt() {
   form.append('receipt', file);
 
   setStatus('OCR in corso...');
+  setOcrDebug(null);
 
   try {
     const response = await fetch('/api/ocr', {
@@ -147,7 +175,15 @@ async function extractReceipt() {
     const data = await response.json();
 
     if (!response.ok) {
-      throw new Error(data.error || 'OCR non riuscito.');
+      const message = data.error || 'OCR non riuscito.';
+      const debugPayload = {
+        requestId: data.requestId || null,
+        details: data.details || null,
+        debug: data.debug || null
+      };
+      const error = new Error(message);
+      error.debugPayload = debugPayload;
+      throw error;
     }
 
     state.items = data.items.length
@@ -159,6 +195,7 @@ async function extractReceipt() {
     setStatus(`Righe estratte: ${data.items.length}. Correggi se necessario.${extra}${hint}`);
     renderItems();
   } catch (error) {
+    setOcrDebug(error.debugPayload || { message: error.message });
     setStatus(`${error.message} Aggiungi le righe manualmente.`);
     console.error('Errore OCR:', error);
   }
@@ -195,3 +232,4 @@ els.paidBy.addEventListener('change', updateSummary);
 els.saveBtn.addEventListener('click', saveSession);
 
 addEmptyItem();
+loadAppMeta();

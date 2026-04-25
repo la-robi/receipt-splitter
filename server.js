@@ -3,10 +3,12 @@ const multer = require('multer');
 const path = require('path');
 const fs = require('fs/promises');
 const Tesseract = require('tesseract.js');
+const { version: appVersion } = require('./package.json');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const upload = multer({ storage: multer.memoryStorage() });
+const buildId = process.env.APP_BUILD_ID || new Date().toISOString();
 
 const DATA_DIR = path.join(__dirname, 'data');
 const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
@@ -164,6 +166,7 @@ async function runOcrWithFallback(imageBuffer) {
   ];
 
   let lastError = null;
+  const failures = [];
   const timeoutMs = Number(process.env.OCR_TIMEOUT_MS || 45000);
 
   for (const attempt of attempts) {
@@ -188,6 +191,11 @@ async function runOcrWithFallback(imageBuffer) {
       };
     } catch (error) {
       lastError = error;
+      failures.push({
+        lang: attempt.lang,
+        reason: attempt.reason,
+        message: error?.message || 'Errore OCR non specificato'
+      });
 
       const message = String(error?.message || '').toLowerCase();
       const isNetworkLanguageLoadIssue =
@@ -202,8 +210,19 @@ async function runOcrWithFallback(imageBuffer) {
     }
   }
 
-  throw lastError;
+  if (lastError) {
+    lastError.ocrFailures = failures;
+  }
+
+  throw lastError || new Error('OCR fallito senza dettagli aggiuntivi.');
 }
+
+app.get('/api/meta', (_req, res) => {
+  return res.json({
+    appVersion,
+    buildId
+  });
+});
 
 app.post('/api/ocr', upload.single('receipt'), async (req, res) => {
   if (!req.file) {
@@ -229,9 +248,19 @@ app.post('/api/ocr', upload.single('receipt'), async (req, res) => {
         : null
     });
   } catch (error) {
+    const requestId = `ocr-${Date.now()}`;
+    console.error(`[${requestId}] OCR error`, error);
+
     return res.status(500).json({
       error: 'OCR non riuscito. Puoi inserire/modificare gli item manualmente.',
-      details: error.message
+      requestId,
+      details: error.message,
+      debug: {
+        name: error?.name || 'Error',
+        message: error?.message || 'Errore OCR non specificato',
+        stack: error?.stack || null,
+        failures: error?.ocrFailures || []
+      }
     });
   }
 });
@@ -282,5 +311,5 @@ app.post('/api/sessions', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Scoppia v1 attiva su http://localhost:${PORT}`);
+  console.log(`Scoppia v${appVersion} attiva su http://localhost:${PORT} (build ${buildId})`);
 });
