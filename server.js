@@ -87,16 +87,19 @@ function inferOwnerFromMemory(name, memory) {
   return 'both';
 }
 
-async function runOcrWithFallback(imageBuffer, trace = () => {}) {
-  const attempts = [
-    { lang: 'ita+eng', reason: 'primary' },
-    { lang: 'ita', reason: 'italian fallback' },
-    { lang: 'eng', reason: 'english fallback' }
-  ];
+async function runOcrWithFallback(imageBuffer, trace = () => {}, options = {}) {
+  const includeFallbacks = options.includeFallbacks !== false;
+  const attempts = includeFallbacks
+    ? [
+      { lang: 'ita+eng', reason: 'primary' },
+      { lang: 'ita', reason: 'italian fallback' },
+      { lang: 'eng', reason: 'english fallback' }
+    ]
+    : [{ lang: 'ita+eng', reason: 'primary' }];
 
   let lastError = null;
   const failures = [];
-  const timeoutMs = Number(process.env.OCR_TIMEOUT_MS || 45000);
+  const timeoutMs = Number(options.timeoutMs || process.env.OCR_TIMEOUT_MS || 20000);
   const allLangs = new Set(attempts.flatMap((attempt) => attempt.lang.split('+')));
 
   for (const lang of allLangs) {
@@ -138,9 +141,15 @@ async function runOcrWithFallback(imageBuffer, trace = () => {}) {
         Tesseract.recognize(imageBuffer, attempt.lang, {
           logger: () => {},
           tessedit_pageseg_mode: '6',
+          tessedit_ocr_engine_mode: '1',
           preserve_interword_spaces: '1',
           load_system_dawg: '0',
           load_freq_dawg: '0',
+          load_unambig_dawg: '0',
+          load_punc_dawg: '0',
+          load_number_dawg: '0',
+          load_bigram_dawg: '0',
+          load_fixed_length_dawgs: '0',
           langPath: TESSDATA_DIR,
           cachePath: TESSDATA_DIR
         }),
@@ -215,6 +224,10 @@ app.post('/api/ocr', upload.single('receipt'), async (req, res) => {
   };
 
   try {
+    const requestStartedAt = Date.now();
+    const requestBudgetMs = Number(process.env.OCR_REQUEST_TIMEOUT_MS || 55000);
+    const hasBudget = () => (Date.now() - requestStartedAt) < requestBudgetMs;
+
     trace('request:received', {
       fileName: req.file.originalname,
       mimeType: req.file.mimetype,
@@ -250,11 +263,22 @@ app.post('/api/ocr', upload.single('receipt'), async (req, res) => {
     };
 
     for (const rotation of rotationAttempts) {
+      if (!hasBudget()) {
+        trace('rotation:skipped-time-budget', { rotation: rotation.label });
+        orientationFailures.push({
+          rotation: rotation.label,
+          message: `Saltata per timeout budget richiesta (${requestBudgetMs}ms)`
+        });
+        continue;
+      }
       trace('rotation:start', { rotation: rotation.label });
       try {
         const candidateImage = await rotateImage90Counterclockwise(sanitizedImage, rotation.steps);
         trace('rotation:prepared', { rotation: rotation.label, byteLength: candidateImage.length });
-        const candidateOcr = await runOcrWithFallback(candidateImage, trace);
+        const candidateOcr = await runOcrWithFallback(candidateImage, trace, {
+          includeFallbacks: false,
+          timeoutMs: Number(process.env.OCR_PRIMARY_TIMEOUT_MS || 12000)
+        });
         const candidateParsed = parseReceiptText(candidateOcr.text);
         const candidateScore = scoreCandidate(candidateParsed, candidateOcr.text);
         trace('parse:done', { rotation: rotation.label, parsedItems: candidateParsed.length });
@@ -299,6 +323,34 @@ app.post('/api/ocr', upload.single('receipt'), async (req, res) => {
           failures: error?.ocrFailures || []
         });
         trace('rotation:error', { rotation: rotation.label, message: error?.message || 'Errore OCR non specificato' });
+      }
+    }
+
+    if ((!bestCandidate || bestCandidate.parsed.length === 0) && hasBudget()) {
+      trace('fallback-phase:start');
+      const fallbackRotation = bestCandidate ? bestCandidate.rotation : rotationAttempts[0];
+      const fallbackImage = await rotateImage90Counterclockwise(sanitizedImage, fallbackRotation.steps);
+      try {
+        const fallbackOcr = await runOcrWithFallback(fallbackImage, trace, {
+          includeFallbacks: true,
+          timeoutMs: Number(process.env.OCR_FALLBACK_TIMEOUT_MS || 16000)
+        });
+        const fallbackParsed = parseReceiptText(fallbackOcr.text);
+        const fallbackScore = scoreCandidate(fallbackParsed, fallbackOcr.text);
+        bestCandidate = {
+          rotation: fallbackRotation,
+          ocr: fallbackOcr,
+          parsed: fallbackParsed,
+          score: fallbackScore
+        };
+        trace('fallback-phase:done', {
+          rotation: fallbackRotation.label,
+          parsedItems: fallbackParsed.length,
+          score: Number(fallbackScore.total.toFixed(2)),
+          plausibleItems: fallbackScore.plausibleCount
+        });
+      } catch (error) {
+        trace('fallback-phase:error', { message: error?.message || 'Errore OCR fallback' });
       }
     }
 
