@@ -2,15 +2,22 @@ const express = require('express');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs/promises');
+const { execFile } = require('child_process');
+const { promisify } = require('util');
 const Tesseract = require('tesseract.js');
+const { version: appVersion } = require('./package.json');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const upload = multer({ storage: multer.memoryStorage() });
+const buildId = process.env.APP_BUILD_ID || new Date().toISOString();
 
 const DATA_DIR = path.join(__dirname, 'data');
 const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
 const MEMORY_FILE = path.join(DATA_DIR, 'item-memory.json');
+const TESSDATA_DIR = path.join(DATA_DIR, 'tessdata');
+const TESSDATA_BASE_URL = process.env.TESSDATA_BASE_URL || 'https://tessdata.projectnaptha.com/4.0.0';
+const execFileAsync = promisify(execFile);
 
 app.use(express.json({ limit: '2mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
@@ -135,6 +142,32 @@ async function writeJson(filePath, payload) {
   await fs.writeFile(filePath, JSON.stringify(payload, null, 2));
 }
 
+async function ensureLanguageData(lang) {
+  const target = path.join(TESSDATA_DIR, `${lang}.traineddata.gz`);
+
+  try {
+    await fs.access(target);
+    return target;
+  } catch {
+    await fs.mkdir(TESSDATA_DIR, { recursive: true });
+  }
+
+  const url = `${TESSDATA_BASE_URL}/${lang}.traineddata.gz`;
+  const tmpTarget = `${target}.tmp`;
+  await execFileAsync('curl', ['-fL', url, '-o', tmpTarget], { timeout: 30000 });
+  await fs.rename(tmpTarget, target);
+  return target;
+}
+
+async function hasLanguageData(lang) {
+  try {
+    await fs.access(path.join(TESSDATA_DIR, `${lang}.traineddata.gz`));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function normalizeItemName(name) {
   return name.toLowerCase().replace(/[^a-zàèéìòù0-9 ]/gi, '').replace(/\s+/g, ' ').trim();
 }
@@ -164,9 +197,39 @@ async function runOcrWithFallback(imageBuffer) {
   ];
 
   let lastError = null;
+  const failures = [];
   const timeoutMs = Number(process.env.OCR_TIMEOUT_MS || 45000);
+  const allLangs = new Set(attempts.flatMap((attempt) => attempt.lang.split('+')));
+
+  for (const lang of allLangs) {
+    try {
+      await ensureLanguageData(lang);
+    } catch (error) {
+      failures.push({
+        lang,
+        reason: 'download-language-data',
+        message: error?.message || 'Download lingua OCR fallito'
+      });
+    }
+  }
 
   for (const attempt of attempts) {
+    const attemptLangs = attempt.lang.split('+');
+    const missingLangs = [];
+    for (const lang of attemptLangs) {
+      const available = await hasLanguageData(lang);
+      if (!available) missingLangs.push(lang);
+    }
+
+    if (missingLangs.length > 0) {
+      failures.push({
+        lang: attempt.lang,
+        reason: attempt.reason,
+        message: `Lingue non disponibili in cache locale: ${missingLangs.join(', ')}`
+      });
+      continue;
+    }
+
     try {
       const result = await Promise.race([
         Tesseract.recognize(imageBuffer, attempt.lang, {
@@ -174,7 +237,9 @@ async function runOcrWithFallback(imageBuffer) {
           tessedit_pageseg_mode: '6',
           preserve_interword_spaces: '1',
           load_system_dawg: '0',
-          load_freq_dawg: '0'
+          load_freq_dawg: '0',
+          langPath: TESSDATA_DIR,
+          cachePath: TESSDATA_DIR
         }),
         new Promise((_, reject) => {
           setTimeout(() => reject(new Error(`OCR timeout (${timeoutMs}ms) on ${attempt.lang}`)), timeoutMs);
@@ -188,22 +253,28 @@ async function runOcrWithFallback(imageBuffer) {
       };
     } catch (error) {
       lastError = error;
+      failures.push({
+        lang: attempt.lang,
+        reason: attempt.reason,
+        message: error?.message || 'Errore OCR non specificato'
+      });
 
-      const message = String(error?.message || '').toLowerCase();
-      const isNetworkLanguageLoadIssue =
-        message.includes('fetch') ||
-        message.includes('network') ||
-        message.includes('failed to load') ||
-        message.includes('traineddata');
-
-      if (isNetworkLanguageLoadIssue) {
-        break;
-      }
     }
   }
 
-  throw lastError;
+  if (lastError) {
+    lastError.ocrFailures = failures;
+  }
+
+  throw lastError || new Error('OCR fallito senza dettagli aggiuntivi.');
 }
+
+app.get('/api/meta', (_req, res) => {
+  return res.json({
+    appVersion,
+    buildId
+  });
+});
 
 app.post('/api/ocr', upload.single('receipt'), async (req, res) => {
   if (!req.file) {
@@ -229,9 +300,19 @@ app.post('/api/ocr', upload.single('receipt'), async (req, res) => {
         : null
     });
   } catch (error) {
+    const requestId = `ocr-${Date.now()}`;
+    console.error(`[${requestId}] OCR error`, error);
+
     return res.status(500).json({
       error: 'OCR non riuscito. Puoi inserire/modificare gli item manualmente.',
-      details: error.message
+      requestId,
+      details: error.message,
+      debug: {
+        name: error?.name || 'Error',
+        message: error?.message || 'Errore OCR non specificato',
+        stack: error?.stack || null,
+        failures: error?.ocrFailures || []
+      }
     });
   }
 });
@@ -282,5 +363,5 @@ app.post('/api/sessions', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Scoppia v1 attiva su http://localhost:${PORT}`);
+  console.log(`Scoppia v${appVersion} attiva su http://localhost:${PORT} (build ${buildId})`);
 });

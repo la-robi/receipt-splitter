@@ -8,7 +8,7 @@
   </head>
   <body>
     <main class="container">
-      <h1>Scoppia v1</h1>
+      <h1>Scoppia v1 <span id="appVersion" class="muted">(...)</span></h1>
       <p class="subtitle">Dividi lo scontrino tra <strong>R</strong> e <strong>T</strong>.</p>
 
       <section class="card">
@@ -16,6 +16,10 @@
         <input id="receiptImage" type="file" accept="image/*" capture="environment" />
         <button id="extractBtn">Estrai righe con OCR</button>
         <p id="status" class="muted"></p>
+        <details id="ocrDebugDetails">
+          <summary>Debug OCR (solo quando c'è un errore)</summary>
+          <pre id="ocrDebugOutput" class="muted"></pre>
+        </details>
       </section>
 
       <section class="card">
