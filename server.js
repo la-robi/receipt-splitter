@@ -4,8 +4,11 @@ const path = require('path');
 const fs = require('fs/promises');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
+const Jimp = require('jimp');
 const Tesseract = require('tesseract.js');
 const { version: appVersion } = require('./package.json');
+const { parseReceiptText } = require('./lib/receipt-parser');
+Tesseract.setLogging(false);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -21,112 +24,6 @@ const execFileAsync = promisify(execFile);
 
 app.use(express.json({ limit: '2mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
-
-const STOPWORDS = [
-  'totale',
-  'subtotale',
-  'pagamento',
-  'contanti',
-  'bancomat',
-  'carta',
-  'resto',
-  'iva',
-  'scontrino',
-  'numero',
-  'p.iva',
-  'codice',
-  'descrizione',
-  'qta',
-  'ticket',
-  'elettronico',
-  'documento commerciale'
-];
-
-function parsePrice(raw) {
-  if (!raw) return null;
-  const normalized = raw
-    .replace(/\s+/g, '')
-    .replace(/\.(?=\d{3}(\D|$))/g, '')
-    .replace(',', '.')
-    .replace(/[^0-9.-]/g, '');
-
-  const value = Number.parseFloat(normalized);
-  return Number.isFinite(value) ? Number(value.toFixed(2)) : null;
-}
-
-function isLikelyTextLine(line) {
-  const cleaned = line.replace(/[^a-zàèéìòù ]/gi, '').trim();
-  return cleaned.length >= 2;
-}
-
-function hasStopword(line) {
-  const low = line.toLowerCase();
-  return STOPWORDS.some((stopword) => low.includes(stopword));
-}
-
-function parseReceiptText(text) {
-  const lines = text
-    .split(/\r?\n/)
-    .map((line) => line.replace(/\s+/g, ' ').trim())
-    .filter(Boolean);
-
-  const items = [];
-  let pendingName = null;
-
-  for (const line of lines) {
-    if (hasStopword(line)) {
-      pendingName = null;
-      continue;
-    }
-
-    const priceOnly = line.match(/^(-?\d+(?:[\.,]\d{2})?)$/);
-    if (priceOnly && pendingName) {
-      const price = parsePrice(priceOnly[1]);
-      if (price !== null) {
-        items.push({
-          id: `${Date.now()}-${items.length}`,
-          name: pendingName,
-          price,
-          owner: 'both'
-        });
-      }
-      pendingName = null;
-      continue;
-    }
-
-    const lineWithPrice = line.match(/(-?\d{1,3}(?:[\.\s]\d{3})*[\.,]\s?\d{2}|-?\d+[\.,]\s?\d{2})\s*$/);
-    if (lineWithPrice) {
-      const price = parsePrice(lineWithPrice[1]);
-      if (price === null) {
-        pendingName = null;
-        continue;
-      }
-
-      const name = line
-        .slice(0, lineWithPrice.index)
-        .replace(/[xX]\s*\d+[\.,]?\d*\s*$/, '')
-        .trim();
-
-      if (isLikelyTextLine(name) && !hasStopword(name)) {
-        items.push({
-          id: `${Date.now()}-${items.length}`,
-          name,
-          price,
-          owner: 'both'
-        });
-      }
-
-      pendingName = null;
-      continue;
-    }
-
-    if (isLikelyTextLine(line)) {
-      pendingName = line;
-    }
-  }
-
-  return items;
-}
 
 async function readJson(filePath, fallback) {
   try {
@@ -189,7 +86,7 @@ function inferOwnerFromMemory(name, memory) {
   return 'both';
 }
 
-async function runOcrWithFallback(imageBuffer) {
+async function runOcrWithFallback(imageBuffer, trace = () => {}) {
   const attempts = [
     { lang: 'ita+eng', reason: 'primary' },
     { lang: 'ita', reason: 'italian fallback' },
@@ -202,9 +99,12 @@ async function runOcrWithFallback(imageBuffer) {
   const allLangs = new Set(attempts.flatMap((attempt) => attempt.lang.split('+')));
 
   for (const lang of allLangs) {
+    trace('ensure-language-data:start', { lang });
     try {
       await ensureLanguageData(lang);
+      trace('ensure-language-data:ok', { lang });
     } catch (error) {
+      trace('ensure-language-data:error', { lang, message: error?.message || 'Download lingua OCR fallito' });
       failures.push({
         lang,
         reason: 'download-language-data',
@@ -214,6 +114,7 @@ async function runOcrWithFallback(imageBuffer) {
   }
 
   for (const attempt of attempts) {
+    trace('ocr-attempt:start', { lang: attempt.lang, reason: attempt.reason });
     const attemptLangs = attempt.lang.split('+');
     const missingLangs = [];
     for (const lang of attemptLangs) {
@@ -222,6 +123,7 @@ async function runOcrWithFallback(imageBuffer) {
     }
 
     if (missingLangs.length > 0) {
+      trace('ocr-attempt:skip-missing-language', { lang: attempt.lang, missingLangs });
       failures.push({
         lang: attempt.lang,
         reason: attempt.reason,
@@ -252,6 +154,7 @@ async function runOcrWithFallback(imageBuffer) {
         usedFallback: attempt.reason !== 'primary'
       };
     } catch (error) {
+      trace('ocr-attempt:error', { lang: attempt.lang, reason: attempt.reason, message: error?.message || 'Errore OCR non specificato' });
       lastError = error;
       failures.push({
         lang: attempt.lang,
@@ -269,6 +172,21 @@ async function runOcrWithFallback(imageBuffer) {
   throw lastError || new Error('OCR fallito senza dettagli aggiuntivi.');
 }
 
+async function rotateImage90Counterclockwise(imageBuffer, steps = 1) {
+  const normalizedSteps = ((steps % 4) + 4) % 4;
+  if (normalizedSteps === 0) return imageBuffer;
+
+  const image = await Jimp.read(imageBuffer);
+  const degrees = normalizedSteps * -90;
+  image.rotate(degrees);
+  return image.getBufferAsync(Jimp.MIME_PNG);
+}
+
+async function sanitizeImageForOcr(imageBuffer) {
+  const image = await Jimp.read(imageBuffer);
+  return image.getBufferAsync(Jimp.MIME_PNG);
+}
+
 app.get('/api/meta', (_req, res) => {
   return res.json({
     appVersion,
@@ -281,9 +199,76 @@ app.post('/api/ocr', upload.single('receipt'), async (req, res) => {
     return res.status(400).json({ error: 'Carica una foto dello scontrino.' });
   }
 
+  const timeline = [];
+  const trace = (step, details = {}) => {
+    timeline.push({
+      at: new Date().toISOString(),
+      step,
+      ...details
+    });
+  };
+
   try {
-    const ocrResult = await runOcrWithFallback(req.file.buffer);
-    const parsed = parseReceiptText(ocrResult.text);
+    trace('request:received', {
+      fileName: req.file.originalname,
+      mimeType: req.file.mimetype,
+      byteLength: req.file.buffer.length
+    });
+
+    trace('image:sanitize:start');
+    const sanitizedImage = await sanitizeImageForOcr(req.file.buffer);
+    trace('image:sanitize:ok', { byteLength: sanitizedImage.length });
+    const rotationAttempts = [
+      { steps: 0, label: 'originale' },
+      { steps: 1, label: 'rotata 90° antiorario' },
+      { steps: 2, label: 'rotata 180°' },
+      { steps: 3, label: 'rotata 270° antiorario' }
+    ];
+    const orientationFailures = [];
+
+    let ocrResult = null;
+    let parsed = [];
+    let usedRotation = rotationAttempts[0];
+
+    for (const rotation of rotationAttempts) {
+      trace('rotation:start', { rotation: rotation.label });
+      try {
+        const candidateImage = await rotateImage90Counterclockwise(sanitizedImage, rotation.steps);
+        trace('rotation:prepared', { rotation: rotation.label, byteLength: candidateImage.length });
+        const candidateOcr = await runOcrWithFallback(candidateImage, trace);
+        const candidateParsed = parseReceiptText(candidateOcr.text);
+        trace('parse:done', { rotation: rotation.label, parsedItems: candidateParsed.length });
+
+        if (candidateParsed.length > 0) {
+          ocrResult = candidateOcr;
+          parsed = candidateParsed;
+          usedRotation = rotation;
+          trace('rotation:accepted', { rotation: rotation.label, parsedItems: candidateParsed.length });
+          break;
+        }
+
+        orientationFailures.push({
+          rotation: rotation.label,
+          message: 'Nessuna riga articolo+prezzo riconosciuta'
+        });
+        trace('rotation:empty-items', { rotation: rotation.label });
+      } catch (error) {
+        orientationFailures.push({
+          rotation: rotation.label,
+          message: error?.message || 'Errore OCR non specificato',
+          failures: error?.ocrFailures || []
+        });
+        trace('rotation:error', { rotation: rotation.label, message: error?.message || 'Errore OCR non specificato' });
+      }
+    }
+
+    if (!ocrResult) {
+      const error = new Error('Nessuna riga riconosciuta dopo 4 orientamenti (0°, 90°, 180°, 270°).');
+      error.orientationFailures = orientationFailures;
+      error.timeline = timeline;
+      throw error;
+    }
+
     const memory = await readJson(MEMORY_FILE, {});
 
     const withSuggestions = parsed.map((item) => ({
@@ -295,9 +280,18 @@ app.post('/api/ocr', upload.single('receipt'), async (req, res) => {
       text: ocrResult.text,
       items: withSuggestions,
       usedLanguage: ocrResult.usedLanguage,
+      usedRotation: usedRotation.label,
       warning: ocrResult.usedFallback
         ? `OCR in fallback con lingua ${ocrResult.usedLanguage}.`
-        : null
+        : null,
+      info: usedRotation.steps > 0 ? `OCR riuscito con immagine ${usedRotation.label}.` : null,
+      timeline,
+      debug: {
+        parsedItems: withSuggestions.length,
+        usedRotation: usedRotation.label,
+        usedLanguage: ocrResult.usedLanguage,
+        textPreview: ocrResult.text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).slice(0, 20)
+      }
     });
   } catch (error) {
     const requestId = `ocr-${Date.now()}`;
@@ -311,7 +305,9 @@ app.post('/api/ocr', upload.single('receipt'), async (req, res) => {
         name: error?.name || 'Error',
         message: error?.message || 'Errore OCR non specificato',
         stack: error?.stack || null,
-        failures: error?.ocrFailures || []
+        failures: error?.ocrFailures || [],
+        orientationFailures: error?.orientationFailures || [],
+        timeline: error?.timeline || timeline
       }
     });
   }
