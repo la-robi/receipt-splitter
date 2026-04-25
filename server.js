@@ -4,6 +4,7 @@ const path = require('path');
 const fs = require('fs/promises');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
+const Jimp = require('jimp');
 const Tesseract = require('tesseract.js');
 const sharp = require('sharp');
 const { version: appVersion } = require('./package.json');
@@ -176,15 +177,15 @@ async function rotateImage90Counterclockwise(imageBuffer, steps = 1) {
   const normalizedSteps = ((steps % 4) + 4) % 4;
   if (normalizedSteps === 0) return imageBuffer;
 
+  const image = await Jimp.read(imageBuffer);
   const degrees = normalizedSteps * -90;
-  return sharp(imageBuffer).rotate(degrees).toBuffer();
+  image.rotate(degrees);
+  return image.getBufferAsync(Jimp.MIME_PNG);
 }
 
 async function sanitizeImageForOcr(imageBuffer) {
-  return sharp(imageBuffer)
-    .rotate()
-    .png()
-    .toBuffer();
+  const image = await Jimp.read(imageBuffer);
+  return image.getBufferAsync(Jimp.MIME_PNG);
 }
 
 app.get('/api/meta', (_req, res) => {
