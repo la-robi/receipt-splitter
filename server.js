@@ -4,9 +4,9 @@ const path = require('path');
 const fs = require('fs/promises');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
+const zlib = require('zlib');
 const Jimp = require('jimp');
 const Tesseract = require('tesseract.js');
-const sharp = require('sharp');
 const { version: appVersion } = require('./package.json');
 const { parseReceiptText } = require('./lib/receipt-parser');
 Tesseract.setLogging(false);
@@ -15,13 +15,22 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const upload = multer({ storage: multer.memoryStorage() });
 const buildId = process.env.APP_BUILD_ID || new Date().toISOString();
+const nodeMajorVersion = Number.parseInt(process.versions.node.split('.')[0], 10) || 0;
+const isLegacyNodeRuntime = nodeMajorVersion < 18;
 
 const DATA_DIR = path.join(__dirname, 'data');
 const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
 const MEMORY_FILE = path.join(DATA_DIR, 'item-memory.json');
 const TESSDATA_DIR = path.join(DATA_DIR, 'tessdata');
 const TESSDATA_BASE_URL = process.env.TESSDATA_BASE_URL || 'https://tessdata.projectnaptha.com/4.0.0';
+const TESSDATA_FAST_BASE_URL = process.env.TESSDATA_FAST_BASE_URL || 'https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main';
+const SYSTEM_TESSDATA_DIRS = [
+  '/usr/share/tesseract-ocr/5/tessdata',
+  '/usr/share/tesseract-ocr/4.00/tessdata',
+  '/usr/share/tesseract-ocr/tessdata'
+];
 const execFileAsync = promisify(execFile);
+const gunzipAsync = promisify(zlib.gunzip);
 
 app.use(express.json({ limit: '2mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
@@ -41,28 +50,64 @@ async function writeJson(filePath, payload) {
 }
 
 async function ensureLanguageData(lang) {
-  const target = path.join(TESSDATA_DIR, `${lang}.traineddata.gz`);
+  const trainedTarget = path.join(TESSDATA_DIR, `${lang}.traineddata`);
+  const gzTarget = path.join(TESSDATA_DIR, `${lang}.traineddata.gz`);
+  const preferSystemTessdata = process.env.PREFER_SYSTEM_TESSDATA !== '0';
+  await fs.mkdir(TESSDATA_DIR, { recursive: true });
 
-  try {
-    await fs.access(target);
-    return target;
-  } catch {
-    await fs.mkdir(TESSDATA_DIR, { recursive: true });
+  if (preferSystemTessdata) {
+    for (const systemDir of SYSTEM_TESSDATA_DIRS) {
+      const source = path.join(systemDir, `${lang}.traineddata`);
+      try {
+        await fs.access(source);
+        await fs.copyFile(source, trainedTarget);
+        return trainedTarget;
+      } catch {
+        // continue: try next location
+      }
+    }
   }
 
-  const url = `${TESSDATA_BASE_URL}/${lang}.traineddata.gz`;
-  const tmpTarget = `${target}.tmp`;
-  await execFileAsync('curl', ['-fL', url, '-o', tmpTarget], { timeout: 30000 });
-  await fs.rename(tmpTarget, target);
-  return target;
+  try {
+    await fs.access(trainedTarget);
+    return trainedTarget;
+  } catch {
+    // try next sources
+  }
+
+  try {
+    await fs.access(gzTarget);
+    const gzBuffer = await fs.readFile(gzTarget);
+    const trainedBuffer = await gunzipAsync(gzBuffer);
+    await fs.writeFile(trainedTarget, trainedBuffer);
+    return trainedTarget;
+  } catch {
+    // fallback to download
+  }
+
+  const fastUrl = `${TESSDATA_FAST_BASE_URL}/${lang}.traineddata`;
+  const fastTmpTarget = `${trainedTarget}.tmp`;
+  await execFileAsync('curl', ['-fL', fastUrl, '-o', fastTmpTarget], { timeout: 30000 });
+  await fs.rename(fastTmpTarget, trainedTarget);
+
+  const gzUrl = `${TESSDATA_BASE_URL}/${lang}.traineddata.gz`;
+  const gzTmpTarget = `${gzTarget}.tmp`;
+  await execFileAsync('curl', ['-fL', gzUrl, '-o', gzTmpTarget], { timeout: 30000 });
+  await fs.rename(gzTmpTarget, gzTarget);
+  return trainedTarget;
 }
 
 async function hasLanguageData(lang) {
   try {
-    await fs.access(path.join(TESSDATA_DIR, `${lang}.traineddata.gz`));
+    await fs.access(path.join(TESSDATA_DIR, `${lang}.traineddata`));
     return true;
   } catch {
-    return false;
+    try {
+      await fs.access(path.join(TESSDATA_DIR, `${lang}.traineddata.gz`));
+      return true;
+    } catch {
+      return false;
+    }
   }
 }
 
@@ -87,16 +132,19 @@ function inferOwnerFromMemory(name, memory) {
   return 'both';
 }
 
-async function runOcrWithFallback(imageBuffer, trace = () => {}) {
-  const attempts = [
-    { lang: 'ita+eng', reason: 'primary' },
-    { lang: 'ita', reason: 'italian fallback' },
-    { lang: 'eng', reason: 'english fallback' }
-  ];
+async function runOcrWithFallback(imageBuffer, trace = () => {}, options = {}) {
+  const includeFallbacks = options.includeFallbacks !== false;
+  const attempts = includeFallbacks
+    ? [
+      { lang: 'ita+eng', reason: 'primary' },
+      { lang: 'ita', reason: 'italian fallback' },
+      { lang: 'eng', reason: 'english fallback' }
+    ]
+    : [{ lang: 'ita+eng', reason: 'primary' }];
 
   let lastError = null;
   const failures = [];
-  const timeoutMs = Number(process.env.OCR_TIMEOUT_MS || 45000);
+  const timeoutMs = Number(options.timeoutMs || process.env.OCR_TIMEOUT_MS || 20000);
   const allLangs = new Set(attempts.flatMap((attempt) => attempt.lang.split('+')));
 
   for (const lang of allLangs) {
@@ -138,9 +186,15 @@ async function runOcrWithFallback(imageBuffer, trace = () => {}) {
         Tesseract.recognize(imageBuffer, attempt.lang, {
           logger: () => {},
           tessedit_pageseg_mode: '6',
+          tessedit_ocr_engine_mode: '1',
           preserve_interword_spaces: '1',
           load_system_dawg: '0',
           load_freq_dawg: '0',
+          load_unambig_dawg: '0',
+          load_punc_dawg: '0',
+          load_number_dawg: '0',
+          load_bigram_dawg: '0',
+          load_fixed_length_dawgs: '0',
           langPath: TESSDATA_DIR,
           cachePath: TESSDATA_DIR
         }),
@@ -184,8 +238,17 @@ async function rotateImage90Counterclockwise(imageBuffer, steps = 1) {
 }
 
 async function sanitizeImageForOcr(imageBuffer) {
-  const image = await Jimp.read(imageBuffer);
-  return image.getBufferAsync(Jimp.MIME_PNG);
+  try {
+    const image = await Jimp.read(imageBuffer);
+    image
+      .greyscale()
+      .contrast(0.25)
+      .normalize();
+    return image.getBufferAsync(Jimp.MIME_PNG);
+  } catch (error) {
+    console.warn('[ocr] sanitize fallback to original image buffer:', error?.message || 'unknown error');
+    return imageBuffer;
+  }
 }
 
 app.get('/api/meta', (_req, res) => {
@@ -210,6 +273,10 @@ app.post('/api/ocr', upload.single('receipt'), async (req, res) => {
   };
 
   try {
+    const requestStartedAt = Date.now();
+    const requestBudgetMs = Number(process.env.OCR_REQUEST_TIMEOUT_MS || 55000);
+    const hasBudget = () => (Date.now() - requestStartedAt) < requestBudgetMs;
+
     trace('request:received', {
       fileName: req.file.originalname,
       mimeType: req.file.mimetype,
@@ -227,32 +294,77 @@ app.post('/api/ocr', upload.single('receipt'), async (req, res) => {
     ];
     const orientationFailures = [];
 
-    let ocrResult = null;
-    let parsed = [];
-    let usedRotation = rotationAttempts[0];
+    let bestCandidate = null;
+
+    const scoreCandidate = (items, text) => {
+      const plausibleItems = items.filter((item) => {
+        const letterCount = (item.name.match(/[a-zàèéìòù]/gi) || []).length;
+        const compactLength = item.name.replace(/\s+/g, '').length;
+        const letterRatio = compactLength > 0 ? letterCount / compactLength : 0;
+        const price = Number(item.price);
+        return letterCount >= 2 && letterRatio >= 0.45 && Number.isFinite(price) && price > 0 && price <= 999.99;
+      });
+
+      return {
+        total: items.length * 100 + plausibleItems.length * 50 + Math.min(String(text || '').length, 5000) / 200,
+        plausibleCount: plausibleItems.length
+      };
+    };
 
     for (const rotation of rotationAttempts) {
+      if (!hasBudget()) {
+        trace('rotation:skipped-time-budget', { rotation: rotation.label });
+        orientationFailures.push({
+          rotation: rotation.label,
+          message: `Saltata per timeout budget richiesta (${requestBudgetMs}ms)`
+        });
+        continue;
+      }
       trace('rotation:start', { rotation: rotation.label });
       try {
         const candidateImage = await rotateImage90Counterclockwise(sanitizedImage, rotation.steps);
         trace('rotation:prepared', { rotation: rotation.label, byteLength: candidateImage.length });
-        const candidateOcr = await runOcrWithFallback(candidateImage, trace);
+        const candidateOcr = await runOcrWithFallback(candidateImage, trace, {
+          includeFallbacks: false,
+          timeoutMs: Number(process.env.OCR_PRIMARY_TIMEOUT_MS || 12000)
+        });
         const candidateParsed = parseReceiptText(candidateOcr.text);
+        const candidateScore = scoreCandidate(candidateParsed, candidateOcr.text);
         trace('parse:done', { rotation: rotation.label, parsedItems: candidateParsed.length });
+        trace('rotation:scored', {
+          rotation: rotation.label,
+          score: Number(candidateScore.total.toFixed(2)),
+          plausibleItems: candidateScore.plausibleCount
+        });
 
-        if (candidateParsed.length > 0) {
-          ocrResult = candidateOcr;
-          parsed = candidateParsed;
-          usedRotation = rotation;
-          trace('rotation:accepted', { rotation: rotation.label, parsedItems: candidateParsed.length });
-          break;
+        if (
+          !bestCandidate
+          || candidateScore.total > bestCandidate.score.total
+          || (
+            candidateScore.total === bestCandidate.score.total
+            && candidateParsed.length > bestCandidate.parsed.length
+          )
+        ) {
+          bestCandidate = {
+            rotation,
+            ocr: candidateOcr,
+            parsed: candidateParsed,
+            score: candidateScore
+          };
+          trace('rotation:best-updated', {
+            rotation: rotation.label,
+            score: Number(candidateScore.total.toFixed(2)),
+            parsedItems: candidateParsed.length,
+            plausibleItems: candidateScore.plausibleCount
+          });
         }
 
         orientationFailures.push({
           rotation: rotation.label,
-          message: 'Nessuna riga articolo+prezzo riconosciuta'
+          message: candidateParsed.length > 0
+            ? `Righe trovate ma scelte solo come alternativa (items=${candidateParsed.length})`
+            : 'Nessuna riga articolo+prezzo riconosciuta'
         });
-        trace('rotation:empty-items', { rotation: rotation.label });
       } catch (error) {
         orientationFailures.push({
           rotation: rotation.label,
@@ -263,12 +375,50 @@ app.post('/api/ocr', upload.single('receipt'), async (req, res) => {
       }
     }
 
-    if (!ocrResult) {
+    if ((!bestCandidate || bestCandidate.parsed.length === 0) && hasBudget()) {
+      trace('fallback-phase:start');
+      const fallbackRotation = bestCandidate ? bestCandidate.rotation : rotationAttempts[0];
+      const fallbackImage = await rotateImage90Counterclockwise(sanitizedImage, fallbackRotation.steps);
+      try {
+        const fallbackOcr = await runOcrWithFallback(fallbackImage, trace, {
+          includeFallbacks: true,
+          timeoutMs: Number(process.env.OCR_FALLBACK_TIMEOUT_MS || 16000)
+        });
+        const fallbackParsed = parseReceiptText(fallbackOcr.text);
+        const fallbackScore = scoreCandidate(fallbackParsed, fallbackOcr.text);
+        bestCandidate = {
+          rotation: fallbackRotation,
+          ocr: fallbackOcr,
+          parsed: fallbackParsed,
+          score: fallbackScore
+        };
+        trace('fallback-phase:done', {
+          rotation: fallbackRotation.label,
+          parsedItems: fallbackParsed.length,
+          score: Number(fallbackScore.total.toFixed(2)),
+          plausibleItems: fallbackScore.plausibleCount
+        });
+      } catch (error) {
+        trace('fallback-phase:error', { message: error?.message || 'Errore OCR fallback' });
+      }
+    }
+
+    if (!bestCandidate || bestCandidate.parsed.length === 0) {
       const error = new Error('Nessuna riga riconosciuta dopo 4 orientamenti (0°, 90°, 180°, 270°).');
       error.orientationFailures = orientationFailures;
       error.timeline = timeline;
       throw error;
     }
+
+    const ocrResult = bestCandidate.ocr;
+    const parsed = bestCandidate.parsed;
+    const usedRotation = bestCandidate.rotation;
+    trace('rotation:accepted', {
+      rotation: usedRotation.label,
+      parsedItems: parsed.length,
+      score: Number(bestCandidate.score.total.toFixed(2)),
+      plausibleItems: bestCandidate.score.plausibleCount
+    });
 
     const memory = await readJson(MEMORY_FILE, {});
 
@@ -360,5 +510,8 @@ app.post('/api/sessions', async (req, res) => {
 });
 
 app.listen(PORT, () => {
+  if (isLegacyNodeRuntime) {
+    console.warn(`[startup] Node ${process.versions.node} rilevato: attivata modalità compatibile senza dipendenze native opzionali.`);
+  }
   console.log(`Scoppia v${appVersion} attiva su http://localhost:${PORT} (build ${buildId})`);
 });
