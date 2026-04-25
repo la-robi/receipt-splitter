@@ -7,6 +7,7 @@ const els = {
   receiptImage: document.getElementById('receiptImage'),
   extractBtn: document.getElementById('extractBtn'),
   status: document.getElementById('status'),
+  ocrLiveLog: document.getElementById('ocrLiveLog'),
   appVersion: document.getElementById('appVersion'),
   ocrDebugDetails: document.getElementById('ocrDebugDetails'),
   ocrDebugOutput: document.getElementById('ocrDebugOutput'),
@@ -78,6 +79,20 @@ function setStatus(message) {
   els.status.textContent = message;
 }
 
+function clearOcrLiveLog() {
+  els.ocrLiveLog.textContent = '';
+}
+
+function appendOcrLiveLog(message, payload = null) {
+  const now = new Date();
+  const ts = now.toLocaleTimeString('it-IT', { hour12: false });
+  const suffix = payload ? ` ${JSON.stringify(payload)}` : '';
+  const line = `[${ts}] ${message}${suffix}`;
+  els.ocrLiveLog.textContent = els.ocrLiveLog.textContent
+    ? `${els.ocrLiveLog.textContent}\n${line}`
+    : line;
+}
+
 function setOcrDebug(debugPayload) {
   if (!debugPayload) {
     els.ocrDebugOutput.textContent = '';
@@ -87,6 +102,20 @@ function setOcrDebug(debugPayload) {
 
   els.ocrDebugOutput.textContent = JSON.stringify(debugPayload, null, 2);
   els.ocrDebugDetails.open = true;
+}
+
+async function parseJsonResponseSafe(response) {
+  const rawBody = await response.text();
+  if (!rawBody) return null;
+
+  try {
+    return JSON.parse(rawBody);
+  } catch (error) {
+    return {
+      parseError: error.message,
+      rawBody
+    };
+  }
 }
 
 async function loadAppMeta() {
@@ -166,6 +195,9 @@ async function extractReceipt() {
   form.append('receipt', file);
 
   setStatus('OCR in corso...');
+  clearOcrLiveLog();
+  appendOcrLiveLog('File selezionato', { fileName: file.name, size: file.size, type: file.type });
+  appendOcrLiveLog('Upload verso /api/ocr avviato');
   setOcrDebug(null);
 
   try {
@@ -173,29 +205,59 @@ async function extractReceipt() {
       method: 'POST',
       body: form
     });
-    const data = await response.json();
+    appendOcrLiveLog('Risposta ricevuta dal server', { status: response.status, statusText: response.statusText });
+    const data = await parseJsonResponseSafe(response);
+    if (Array.isArray(data?.timeline)) {
+      data.timeline.forEach((event) => appendOcrLiveLog(`Server: ${event.step}`, event));
+    }
 
     if (!response.ok) {
-      const message = data.error || 'OCR non riuscito.';
+      const message = data?.error || `OCR non riuscito (HTTP ${response.status}).`;
       const debugPayload = {
-        requestId: data.requestId || null,
-        details: data.details || null,
-        debug: data.debug || null
+        requestId: data?.requestId || null,
+        status: response.status,
+        statusText: response.statusText,
+        details: data?.details || null,
+        debug: data?.debug || null,
+        rawResponseBody: data?.rawBody || null,
+        parseError: data?.parseError || null
       };
       const error = new Error(message);
       error.debugPayload = debugPayload;
       throw error;
     }
 
-    state.items = data.items.length
-      ? data.items.map((it) => ({ ...it, id: crypto.randomUUID() }))
+    if (!data || typeof data !== 'object') {
+      const error = new Error('Risposta OCR vuota o non valida.');
+      error.debugPayload = {
+        status: response.status,
+        statusText: response.statusText,
+        body: data
+      };
+      throw error;
+    }
+
+    const extractedItems = Array.isArray(data.items) ? data.items : [];
+
+    state.items = extractedItems.length
+      ? extractedItems.map((it) => ({ ...it, id: crypto.randomUUID() }))
       : [{ id: crypto.randomUUID(), name: '', price: 0, owner: 'both' }];
 
-    const extra = data.warning ? ` (${data.warning})` : '';
-    const hint = data.items.length === 0 ? ' Prova a rifare la foto più dritta e vicina agli item.' : '';
-    setStatus(`Righe estratte: ${data.items.length}. Correggi se necessario.${extra}${hint}`);
+    const extraParts = [data.warning, data.info].filter(Boolean);
+    const extra = extraParts.length > 0 ? ` (${extraParts.join(' ')})` : '';
+    const hint = extractedItems.length === 0 ? ' Prova a rifare la foto più dritta e vicina agli item.' : '';
+    setStatus(`Righe estratte: ${extractedItems.length}. Correggi se necessario.${extra}${hint}`);
+    appendOcrLiveLog('Parsing completato', { extractedItems: extractedItems.length });
+    if (data.debug && extractedItems.length <= 1) {
+      setOcrDebug({
+        mode: 'low-confidence',
+        message: 'OCR con poche righe estratte: controlla testo e prezzi riconosciuti.',
+        ...data.debug
+      });
+    }
     renderItems();
   } catch (error) {
+    appendOcrLiveLog('Errore durante OCR', { message: error.message });
     setOcrDebug(error.debugPayload || { message: error.message });
     setStatus(`${error.message} Aggiungi le righe manualmente.`);
     console.error('Errore OCR:', error);

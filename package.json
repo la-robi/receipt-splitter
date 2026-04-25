@@ -1,15 +1,17 @@
 {
   "name": "scoppia-v1",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Web app mobile-first per dividere spese scontrino tra R e T",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node server.js"
+    "dev": "node server.js",
+    "test:receipt-parser": "node scripts/test-receipt-parser.js"
   },
   "dependencies": {
     "express": "^4.19.2",
     "multer": "^1.4.5-lts.1",
+    "sharp": "^0.34.5",
     "tesseract.js": "^5.1.1"
   }
 }
