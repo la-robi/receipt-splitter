@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="it">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Scoppia v1</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <main class="container">
+      <h1>Scoppia v1</h1>
+      <p class="subtitle">Dividi lo scontrino tra <strong>R</strong> e <strong>T</strong>.</p>
+
+      <section class="card">
+        <label for="receiptImage">1) Carica foto scontrino</label>
+        <input id="receiptImage" type="file" accept="image/*" capture="environment" />
+        <button id="extractBtn">Estrai righe con OCR</button>
+        <p id="status" class="muted"></p>
+      </section>
+
+      <section class="card">
+        <div class="section-title-row">
+          <h2>2) Lista item modificabile</h2>
+          <button id="addItemBtn" class="secondary">+ Riga</button>
+        </div>
+        <div id="itemsList"></div>
+      </section>
+
+      <section class="card">
+        <h2>3) Pagamenti</h2>
+        <label for="mealVouchers">Buoni pasto pagati da R (€)</label>
+        <input id="mealVouchers" type="number" step="0.01" min="0" value="0" />
+
+        <label for="paidBy">Chi ha pagato alla cassa?</label>
+        <select id="paidBy">
+          <option value="t">T</option>
+          <option value="r">R</option>
+        </select>
+      </section>
+
+      <section class="card">
+        <h2>4) Recap</h2>
+        <div id="summary"></div>
+      </section>
+
+      <section class="card footer-actions">
+        <button id="saveBtn">Accetta conto e salva</button>
+        <p id="saveMessage" class="muted"></p>
+      </section>
+    </main>
+
+    <template id="itemTemplate">
+      <article class="item-row">
+        <button class="icon-btn" title="Modifica">✏️</button>
+        <input class="name-input" placeholder="Nome articolo" />
+        <input class="price-input" type="number" step="0.01" placeholder="0.00" />
+        <div class="owner-group">
+          <button data-owner="r" type="button">R</button>
+          <button data-owner="t" type="button">T</button>
+          <button data-owner="both" type="button">Entrambi</button>
+        </div>
+        <button class="delete-btn" type="button">🗑️</button>
+      </article>
+    </template>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

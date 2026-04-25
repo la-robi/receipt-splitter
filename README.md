@@ -1,29 +1,50 @@
 # Ripartitore degli Scontrini di Coppia (aka Scoppia) v.1
 
-Web app mobile-first per dividere le spese degli scontrini tra due persone.
+Web app mobile-first per dividere le spese degli scontrini tra due persone (R e T).
 
-## Obiettivo
+## Cosa fa l'MVP
 
-L'app Scoppia v.1 permette di caricare una foto di uno scontrino, riconoscere testo e prezzo degli item, farne una lista che l'utente può catalogare con flag R, T, Entrambi. L'app calcola quindi quanto ha speso R e quanto ha speso T tra spese personali e la metà di quelle comuni.
+- Carica una foto dello scontrino da smartphone.
+- Estrae automaticamente righe `articolo + prezzo` via OCR (`tesseract.js`, italiano+inglese).
+- Mostra una lista completamente modificabile (nome e prezzo), con icona matita e cancellazione riga.
+- Permette assegnazione di ogni riga a `R`, `T` o `Entrambi`.
+- Gestisce item negativi (sconti): vengono sommati come valori negativi e quindi detratti dai totali.
+- Permette di inserire i buoni pasto usati da R.
+- Permette di scegliere chi ha pagato alla cassa (`R` oppure `T`).
+- Calcola recap dettagliato:
+  - Totali personali R/T
+  - Spesa comune
+  - Quote dovute (`personali + comune/2`)
+  - Buoni pasto di R
+  - Pagato alla cassa da T (se T è la persona selezionata)
+  - Finale con formule richieste:
+    - `R finale = quota dovuta R - buoni pasto`
+    - `T finale = quota dovuta T - pagato alla cassa da T`
+- Salva il conto accettato in archivio locale (`data/sessions.json`).
+- Memorizza storico item/assegnazione (`data/item-memory.json`) per suggerire automaticamente il proprietario nei caricamenti futuri.
 
-## MVP iniziale
+## Stack
 
-- Caricamento di una foto dello scontrino
-- Estrazione automatica delle righe con AI/OCR in cui ogni riga ha
-  - nome articolo
-  - prezzo
-  - assegnazione: Persona A, Persona B, Entrambi
-- Possibilità di modificare la riga
-- Calcolo automatico dei totali
-- Sezione per eventuale caricamento buoni pasto utilizzati
-- Riepilogo finale
-- Interfaccia semplice e ottimizzata per smartphone
+- Node.js + Express
+- Frontend vanilla HTML/CSS/JS (mobile-first)
+- OCR: `tesseract.js`
+- Storage locale: file JSON in `data/`
 
-## Funzionalità future
+## Avvio locale
 
-- Guess dell'Ai sulla divisione degli item tra R, T o Entrambi (comunque modificabile) in base allo storico e alle istruzioni ricevute.
+```bash
+npm install
+npm start
+```
 
-## Regola importante
+Poi apri `http://localhost:3000`.
 
-L'AI non deve mai salvare dati automaticamente senza conferma dell'utente.
-Ogni riga estratta deve essere modificabile prima del salvataggio.
+## API essenziali
+
+- `POST /api/ocr` (`multipart/form-data`, campo `receipt`)
+- `GET /api/sessions`
+- `POST /api/sessions`
+
+## Nota
+
+L'app non salva automaticamente il risultato OCR come conto definitivo: il salvataggio avviene solo quando premi **"Accetta conto e salva"**.
