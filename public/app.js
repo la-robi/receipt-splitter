@@ -225,6 +225,13 @@ async function extractReceipt() {
     const extra = extraParts.length > 0 ? ` (${extraParts.join(' ')})` : '';
     const hint = extractedItems.length === 0 ? ' Prova a rifare la foto più dritta e vicina agli item.' : '';
     setStatus(`Righe estratte: ${extractedItems.length}. Correggi se necessario.${extra}${hint}`);
+    if (data.debug && extractedItems.length <= 1) {
+      setOcrDebug({
+        mode: 'low-confidence',
+        message: 'OCR con poche righe estratte: controlla testo e prezzi riconosciuti.',
+        ...data.debug
+      });
+    }
     renderItems();
   } catch (error) {
     setOcrDebug(error.debugPayload || { message: error.message });

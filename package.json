@@ -5,7 +5,8 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node server.js"
+    "dev": "node server.js",
+    "test:receipt-parser": "node scripts/test-receipt-parser.js"
   },
   "dependencies": {
     "express": "^4.19.2",

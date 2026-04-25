@@ -7,6 +7,7 @@ const { promisify } = require('util');
 const Tesseract = require('tesseract.js');
 const sharp = require('sharp');
 const { version: appVersion } = require('./package.json');
+const { parseReceiptText } = require('./lib/receipt-parser');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -22,112 +23,6 @@ const execFileAsync = promisify(execFile);
 
 app.use(express.json({ limit: '2mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
-
-const STOPWORDS = [
-  'totale',
-  'subtotale',
-  'pagamento',
-  'contanti',
-  'bancomat',
-  'carta',
-  'resto',
-  'iva',
-  'scontrino',
-  'numero',
-  'p.iva',
-  'codice',
-  'descrizione',
-  'qta',
-  'ticket',
-  'elettronico',
-  'documento commerciale'
-];
-
-function parsePrice(raw) {
-  if (!raw) return null;
-  const normalized = raw
-    .replace(/\s+/g, '')
-    .replace(/\.(?=\d{3}(\D|$))/g, '')
-    .replace(',', '.')
-    .replace(/[^0-9.-]/g, '');
-
-  const value = Number.parseFloat(normalized);
-  return Number.isFinite(value) ? Number(value.toFixed(2)) : null;
-}
-
-function isLikelyTextLine(line) {
-  const cleaned = line.replace(/[^a-zàèéìòù ]/gi, '').trim();
-  return cleaned.length >= 2;
-}
-
-function hasStopword(line) {
-  const low = line.toLowerCase();
-  return STOPWORDS.some((stopword) => low.includes(stopword));
-}
-
-function parseReceiptText(text) {
-  const lines = text
-    .split(/\r?\n/)
-    .map((line) => line.replace(/\s+/g, ' ').trim())
-    .filter(Boolean);
-
-  const items = [];
-  let pendingName = null;
-
-  for (const line of lines) {
-    if (hasStopword(line)) {
-      pendingName = null;
-      continue;
-    }
-
-    const priceOnly = line.match(/^(-?\d+(?:[\.,]\d{2})?)$/);
-    if (priceOnly && pendingName) {
-      const price = parsePrice(priceOnly[1]);
-      if (price !== null) {
-        items.push({
-          id: `${Date.now()}-${items.length}`,
-          name: pendingName,
-          price,
-          owner: 'both'
-        });
-      }
-      pendingName = null;
-      continue;
-    }
-
-    const lineWithPrice = line.match(/(-?\d{1,3}(?:[\.\s]\d{3})*[\.,]\s?\d{2}|-?\d+[\.,]\s?\d{2})\s*$/);
-    if (lineWithPrice) {
-      const price = parsePrice(lineWithPrice[1]);
-      if (price === null) {
-        pendingName = null;
-        continue;
-      }
-
-      const name = line
-        .slice(0, lineWithPrice.index)
-        .replace(/[xX]\s*\d+[\.,]?\d*\s*$/, '')
-        .trim();
-
-      if (isLikelyTextLine(name) && !hasStopword(name)) {
-        items.push({
-          id: `${Date.now()}-${items.length}`,
-          name,
-          price,
-          owner: 'both'
-        });
-      }
-
-      pendingName = null;
-      continue;
-    }
-
-    if (isLikelyTextLine(line)) {
-      pendingName = line;
-    }
-  }
-
-  return items;
-}
 
 async function readJson(filePath, fallback) {
   try {
@@ -358,7 +253,13 @@ app.post('/api/ocr', upload.single('receipt'), async (req, res) => {
       warning: ocrResult.usedFallback
         ? `OCR in fallback con lingua ${ocrResult.usedLanguage}.`
         : null,
-      info: usedRotation.steps > 0 ? `OCR riuscito con immagine ${usedRotation.label}.` : null
+      info: usedRotation.steps > 0 ? `OCR riuscito con immagine ${usedRotation.label}.` : null,
+      debug: {
+        parsedItems: withSuggestions.length,
+        usedRotation: usedRotation.label,
+        usedLanguage: ocrResult.usedLanguage,
+        textPreview: ocrResult.text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).slice(0, 20)
+      }
     });
   } catch (error) {
     const requestId = `ocr-${Date.now()}`;
