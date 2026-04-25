@@ -6,6 +6,7 @@ const { execFile } = require('child_process');
 const { promisify } = require('util');
 const Jimp = require('jimp');
 const Tesseract = require('tesseract.js');
+const sharp = require('sharp');
 const { version: appVersion } = require('./package.json');
 const { parseReceiptText } = require('./lib/receipt-parser');
 Tesseract.setLogging(false);
