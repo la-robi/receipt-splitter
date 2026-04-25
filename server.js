@@ -4,6 +4,7 @@ const path = require('path');
 const fs = require('fs/promises');
 const { execFile } = require('child_process');
 const { promisify } = require('util');
+const zlib = require('zlib');
 const Jimp = require('jimp');
 const Tesseract = require('tesseract.js');
 const { version: appVersion } = require('./package.json');
@@ -22,7 +23,14 @@ const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
 const MEMORY_FILE = path.join(DATA_DIR, 'item-memory.json');
 const TESSDATA_DIR = path.join(DATA_DIR, 'tessdata');
 const TESSDATA_BASE_URL = process.env.TESSDATA_BASE_URL || 'https://tessdata.projectnaptha.com/4.0.0';
+const TESSDATA_FAST_BASE_URL = process.env.TESSDATA_FAST_BASE_URL || 'https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/main';
+const SYSTEM_TESSDATA_DIRS = [
+  '/usr/share/tesseract-ocr/5/tessdata',
+  '/usr/share/tesseract-ocr/4.00/tessdata',
+  '/usr/share/tesseract-ocr/tessdata'
+];
 const execFileAsync = promisify(execFile);
+const gunzipAsync = promisify(zlib.gunzip);
 
 app.use(express.json({ limit: '2mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
@@ -42,28 +50,64 @@ async function writeJson(filePath, payload) {
 }
 
 async function ensureLanguageData(lang) {
-  const target = path.join(TESSDATA_DIR, `${lang}.traineddata.gz`);
+  const trainedTarget = path.join(TESSDATA_DIR, `${lang}.traineddata`);
+  const gzTarget = path.join(TESSDATA_DIR, `${lang}.traineddata.gz`);
+  const preferSystemTessdata = process.env.PREFER_SYSTEM_TESSDATA !== '0';
+  await fs.mkdir(TESSDATA_DIR, { recursive: true });
 
-  try {
-    await fs.access(target);
-    return target;
-  } catch {
-    await fs.mkdir(TESSDATA_DIR, { recursive: true });
+  if (preferSystemTessdata) {
+    for (const systemDir of SYSTEM_TESSDATA_DIRS) {
+      const source = path.join(systemDir, `${lang}.traineddata`);
+      try {
+        await fs.access(source);
+        await fs.copyFile(source, trainedTarget);
+        return trainedTarget;
+      } catch {
+        // continue: try next location
+      }
+    }
   }
 
-  const url = `${TESSDATA_BASE_URL}/${lang}.traineddata.gz`;
-  const tmpTarget = `${target}.tmp`;
-  await execFileAsync('curl', ['-fL', url, '-o', tmpTarget], { timeout: 30000 });
-  await fs.rename(tmpTarget, target);
-  return target;
+  try {
+    await fs.access(trainedTarget);
+    return trainedTarget;
+  } catch {
+    // try next sources
+  }
+
+  try {
+    await fs.access(gzTarget);
+    const gzBuffer = await fs.readFile(gzTarget);
+    const trainedBuffer = await gunzipAsync(gzBuffer);
+    await fs.writeFile(trainedTarget, trainedBuffer);
+    return trainedTarget;
+  } catch {
+    // fallback to download
+  }
+
+  const fastUrl = `${TESSDATA_FAST_BASE_URL}/${lang}.traineddata`;
+  const fastTmpTarget = `${trainedTarget}.tmp`;
+  await execFileAsync('curl', ['-fL', fastUrl, '-o', fastTmpTarget], { timeout: 30000 });
+  await fs.rename(fastTmpTarget, trainedTarget);
+
+  const gzUrl = `${TESSDATA_BASE_URL}/${lang}.traineddata.gz`;
+  const gzTmpTarget = `${gzTarget}.tmp`;
+  await execFileAsync('curl', ['-fL', gzUrl, '-o', gzTmpTarget], { timeout: 30000 });
+  await fs.rename(gzTmpTarget, gzTarget);
+  return trainedTarget;
 }
 
 async function hasLanguageData(lang) {
   try {
-    await fs.access(path.join(TESSDATA_DIR, `${lang}.traineddata.gz`));
+    await fs.access(path.join(TESSDATA_DIR, `${lang}.traineddata`));
     return true;
   } catch {
-    return false;
+    try {
+      await fs.access(path.join(TESSDATA_DIR, `${lang}.traineddata.gz`));
+      return true;
+    } catch {
+      return false;
+    }
   }
 }
 
