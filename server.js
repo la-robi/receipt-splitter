@@ -6,7 +6,6 @@ const { execFile } = require('child_process');
 const { promisify } = require('util');
 const Jimp = require('jimp');
 const Tesseract = require('tesseract.js');
-const sharp = require('sharp');
 const { version: appVersion } = require('./package.json');
 const { parseReceiptText } = require('./lib/receipt-parser');
 Tesseract.setLogging(false);
@@ -15,6 +14,8 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const upload = multer({ storage: multer.memoryStorage() });
 const buildId = process.env.APP_BUILD_ID || new Date().toISOString();
+const nodeMajorVersion = Number.parseInt(process.versions.node.split('.')[0], 10) || 0;
+const isLegacyNodeRuntime = nodeMajorVersion < 18;
 
 const DATA_DIR = path.join(__dirname, 'data');
 const SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
@@ -193,13 +194,17 @@ async function rotateImage90Counterclockwise(imageBuffer, steps = 1) {
 }
 
 async function sanitizeImageForOcr(imageBuffer) {
-  return sharp(imageBuffer)
-    .rotate()
-    .grayscale()
-    .normalize()
-    .sharpen()
-    .png()
-    .toBuffer();
+  try {
+    const image = await Jimp.read(imageBuffer);
+    image
+      .greyscale()
+      .contrast(0.25)
+      .normalize();
+    return image.getBufferAsync(Jimp.MIME_PNG);
+  } catch (error) {
+    console.warn('[ocr] sanitize fallback to original image buffer:', error?.message || 'unknown error');
+    return imageBuffer;
+  }
 }
 
 app.get('/api/meta', (_req, res) => {
@@ -461,5 +466,8 @@ app.post('/api/sessions', async (req, res) => {
 });
 
 app.listen(PORT, () => {
+  if (isLegacyNodeRuntime) {
+    console.warn(`[startup] Node ${process.versions.node} rilevato: attivata modalità compatibile senza dipendenze native opzionali.`);
+  }
   console.log(`Scoppia v${appVersion} attiva su http://localhost:${PORT} (build ${buildId})`);
 });
