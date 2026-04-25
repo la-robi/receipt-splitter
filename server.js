@@ -164,16 +164,22 @@ async function runOcrWithFallback(imageBuffer) {
   ];
 
   let lastError = null;
+  const timeoutMs = Number(process.env.OCR_TIMEOUT_MS || 45000);
 
   for (const attempt of attempts) {
     try {
-      const result = await Tesseract.recognize(imageBuffer, attempt.lang, {
-        logger: () => {},
-        tessedit_pageseg_mode: '6',
-        preserve_interword_spaces: '1',
-        load_system_dawg: '0',
-        load_freq_dawg: '0'
-      });
+      const result = await Promise.race([
+        Tesseract.recognize(imageBuffer, attempt.lang, {
+          logger: () => {},
+          tessedit_pageseg_mode: '6',
+          preserve_interword_spaces: '1',
+          load_system_dawg: '0',
+          load_freq_dawg: '0'
+        }),
+        new Promise((_, reject) => {
+          setTimeout(() => reject(new Error(`OCR timeout (${timeoutMs}ms) on ${attempt.lang}`)), timeoutMs);
+        })
+      ]);
 
       return {
         text: result.data.text,
@@ -182,6 +188,17 @@ async function runOcrWithFallback(imageBuffer) {
       };
     } catch (error) {
       lastError = error;
+
+      const message = String(error?.message || '').toLowerCase();
+      const isNetworkLanguageLoadIssue =
+        message.includes('fetch') ||
+        message.includes('network') ||
+        message.includes('failed to load') ||
+        message.includes('traineddata');
+
+      if (isNetworkLanguageLoadIssue) {
+        break;
+      }
     }
   }
 
