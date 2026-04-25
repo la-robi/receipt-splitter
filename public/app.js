@@ -154,10 +154,13 @@ async function extractReceipt() {
       ? data.items.map((it) => ({ ...it, id: crypto.randomUUID() }))
       : [{ id: crypto.randomUUID(), name: '', price: 0, owner: 'both' }];
 
-    setStatus(`Righe estratte: ${data.items.length}. Correggi se necessario.`);
+    const extra = data.warning ? ` (${data.warning})` : '';
+    const hint = data.items.length === 0 ? ' Prova a rifare la foto più dritta e vicina agli item.' : '';
+    setStatus(`Righe estratte: ${data.items.length}. Correggi se necessario.${extra}${hint}`);
     renderItems();
   } catch (error) {
     setStatus(`${error.message} Aggiungi le righe manualmente.`);
+    console.error('Errore OCR:', error);
   }
 }
 

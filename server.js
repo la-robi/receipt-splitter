@@ -29,51 +29,93 @@ const STOPWORDS = [
   'p.iva',
   'codice',
   'descrizione',
-  'qta'
+  'qta',
+  'ticket',
+  'elettronico',
+  'documento commerciale'
 ];
 
 function parsePrice(raw) {
   if (!raw) return null;
-  const normalized = raw.replace(/[^0-9,.-]/g, '').replace(',', '.');
+  const normalized = raw
+    .replace(/\s+/g, '')
+    .replace(/\.(?=\d{3}(\D|$))/g, '')
+    .replace(',', '.')
+    .replace(/[^0-9.-]/g, '');
+
   const value = Number.parseFloat(normalized);
   return Number.isFinite(value) ? Number(value.toFixed(2)) : null;
+}
+
+function isLikelyTextLine(line) {
+  const cleaned = line.replace(/[^a-zàèéìòù ]/gi, '').trim();
+  return cleaned.length >= 2;
+}
+
+function hasStopword(line) {
+  const low = line.toLowerCase();
+  return STOPWORDS.some((stopword) => low.includes(stopword));
 }
 
 function parseReceiptText(text) {
   const lines = text
     .split(/\r?\n/)
-    .map((line) => line.trim())
+    .map((line) => line.replace(/\s+/g, ' ').trim())
     .filter(Boolean);
 
   const items = [];
+  let pendingName = null;
 
   for (const line of lines) {
-    const low = line.toLowerCase();
-    if (STOPWORDS.some((stopword) => low.includes(stopword))) {
+    if (hasStopword(line)) {
+      pendingName = null;
       continue;
     }
 
-    const priceMatch = line.match(/(-?\d+[\.,]\d{2})\s*$/);
-    if (!priceMatch) {
+    const priceOnly = line.match(/^(-?\d+(?:[\.,]\d{2})?)$/);
+    if (priceOnly && pendingName) {
+      const price = parsePrice(priceOnly[1]);
+      if (price !== null) {
+        items.push({
+          id: `${Date.now()}-${items.length}`,
+          name: pendingName,
+          price,
+          owner: 'both'
+        });
+      }
+      pendingName = null;
       continue;
     }
 
-    const price = parsePrice(priceMatch[1]);
-    if (price === null) {
+    const lineWithPrice = line.match(/(-?\d{1,3}(?:[\.\s]\d{3})*[\.,]\s?\d{2}|-?\d+[\.,]\s?\d{2})\s*$/);
+    if (lineWithPrice) {
+      const price = parsePrice(lineWithPrice[1]);
+      if (price === null) {
+        pendingName = null;
+        continue;
+      }
+
+      const name = line
+        .slice(0, lineWithPrice.index)
+        .replace(/[xX]\s*\d+[\.,]?\d*\s*$/, '')
+        .trim();
+
+      if (isLikelyTextLine(name) && !hasStopword(name)) {
+        items.push({
+          id: `${Date.now()}-${items.length}`,
+          name,
+          price,
+          owner: 'both'
+        });
+      }
+
+      pendingName = null;
       continue;
     }
 
-    const name = line.slice(0, priceMatch.index).replace(/[xX]\s*\d+[\.,]?\d*\s*$/, '').trim();
-    if (!name || name.length < 2) {
-      continue;
+    if (isLikelyTextLine(line)) {
+      pendingName = line;
     }
-
-    items.push({
-      id: `${Date.now()}-${items.length}`,
-      name,
-      price,
-      owner: 'both'
-    });
   }
 
   return items;
@@ -114,17 +156,46 @@ function inferOwnerFromMemory(name, memory) {
   return 'both';
 }
 
+async function runOcrWithFallback(imageBuffer) {
+  const attempts = [
+    { lang: 'ita+eng', reason: 'primary' },
+    { lang: 'ita', reason: 'italian fallback' },
+    { lang: 'eng', reason: 'english fallback' }
+  ];
+
+  let lastError = null;
+
+  for (const attempt of attempts) {
+    try {
+      const result = await Tesseract.recognize(imageBuffer, attempt.lang, {
+        logger: () => {},
+        tessedit_pageseg_mode: '6',
+        preserve_interword_spaces: '1',
+        load_system_dawg: '0',
+        load_freq_dawg: '0'
+      });
+
+      return {
+        text: result.data.text,
+        usedLanguage: attempt.lang,
+        usedFallback: attempt.reason !== 'primary'
+      };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  throw lastError;
+}
+
 app.post('/api/ocr', upload.single('receipt'), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'Carica una foto dello scontrino.' });
   }
 
   try {
-    const result = await Tesseract.recognize(req.file.buffer, 'ita+eng', {
-      logger: () => {}
-    });
-
-    const parsed = parseReceiptText(result.data.text);
+    const ocrResult = await runOcrWithFallback(req.file.buffer);
+    const parsed = parseReceiptText(ocrResult.text);
     const memory = await readJson(MEMORY_FILE, {});
 
     const withSuggestions = parsed.map((item) => ({
@@ -133,8 +204,12 @@ app.post('/api/ocr', upload.single('receipt'), async (req, res) => {
     }));
 
     return res.json({
-      text: result.data.text,
-      items: withSuggestions
+      text: ocrResult.text,
+      items: withSuggestions,
+      usedLanguage: ocrResult.usedLanguage,
+      warning: ocrResult.usedFallback
+        ? `OCR in fallback con lingua ${ocrResult.usedLanguage}.`
+        : null
     });
   } catch (error) {
     return res.status(500).json({
