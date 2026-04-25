@@ -184,8 +184,13 @@ async function rotateImage90Counterclockwise(imageBuffer, steps = 1) {
 }
 
 async function sanitizeImageForOcr(imageBuffer) {
-  const image = await Jimp.read(imageBuffer);
-  return image.getBufferAsync(Jimp.MIME_PNG);
+  return sharp(imageBuffer)
+    .rotate()
+    .grayscale()
+    .normalize()
+    .sharpen()
+    .png()
+    .toBuffer();
 }
 
 app.get('/api/meta', (_req, res) => {
@@ -227,9 +232,22 @@ app.post('/api/ocr', upload.single('receipt'), async (req, res) => {
     ];
     const orientationFailures = [];
 
-    let ocrResult = null;
-    let parsed = [];
-    let usedRotation = rotationAttempts[0];
+    let bestCandidate = null;
+
+    const scoreCandidate = (items, text) => {
+      const plausibleItems = items.filter((item) => {
+        const letterCount = (item.name.match(/[a-zàèéìòù]/gi) || []).length;
+        const compactLength = item.name.replace(/\s+/g, '').length;
+        const letterRatio = compactLength > 0 ? letterCount / compactLength : 0;
+        const price = Number(item.price);
+        return letterCount >= 2 && letterRatio >= 0.45 && Number.isFinite(price) && price > 0 && price <= 999.99;
+      });
+
+      return {
+        total: items.length * 100 + plausibleItems.length * 50 + Math.min(String(text || '').length, 5000) / 200,
+        plausibleCount: plausibleItems.length
+      };
+    };
 
     for (const rotation of rotationAttempts) {
       trace('rotation:start', { rotation: rotation.label });
@@ -238,21 +256,42 @@ app.post('/api/ocr', upload.single('receipt'), async (req, res) => {
         trace('rotation:prepared', { rotation: rotation.label, byteLength: candidateImage.length });
         const candidateOcr = await runOcrWithFallback(candidateImage, trace);
         const candidateParsed = parseReceiptText(candidateOcr.text);
+        const candidateScore = scoreCandidate(candidateParsed, candidateOcr.text);
         trace('parse:done', { rotation: rotation.label, parsedItems: candidateParsed.length });
+        trace('rotation:scored', {
+          rotation: rotation.label,
+          score: Number(candidateScore.total.toFixed(2)),
+          plausibleItems: candidateScore.plausibleCount
+        });
 
-        if (candidateParsed.length > 0) {
-          ocrResult = candidateOcr;
-          parsed = candidateParsed;
-          usedRotation = rotation;
-          trace('rotation:accepted', { rotation: rotation.label, parsedItems: candidateParsed.length });
-          break;
+        if (
+          !bestCandidate
+          || candidateScore.total > bestCandidate.score.total
+          || (
+            candidateScore.total === bestCandidate.score.total
+            && candidateParsed.length > bestCandidate.parsed.length
+          )
+        ) {
+          bestCandidate = {
+            rotation,
+            ocr: candidateOcr,
+            parsed: candidateParsed,
+            score: candidateScore
+          };
+          trace('rotation:best-updated', {
+            rotation: rotation.label,
+            score: Number(candidateScore.total.toFixed(2)),
+            parsedItems: candidateParsed.length,
+            plausibleItems: candidateScore.plausibleCount
+          });
         }
 
         orientationFailures.push({
           rotation: rotation.label,
-          message: 'Nessuna riga articolo+prezzo riconosciuta'
+          message: candidateParsed.length > 0
+            ? `Righe trovate ma scelte solo come alternativa (items=${candidateParsed.length})`
+            : 'Nessuna riga articolo+prezzo riconosciuta'
         });
-        trace('rotation:empty-items', { rotation: rotation.label });
       } catch (error) {
         orientationFailures.push({
           rotation: rotation.label,
@@ -263,12 +302,22 @@ app.post('/api/ocr', upload.single('receipt'), async (req, res) => {
       }
     }
 
-    if (!ocrResult) {
+    if (!bestCandidate || bestCandidate.parsed.length === 0) {
       const error = new Error('Nessuna riga riconosciuta dopo 4 orientamenti (0°, 90°, 180°, 270°).');
       error.orientationFailures = orientationFailures;
       error.timeline = timeline;
       throw error;
     }
+
+    const ocrResult = bestCandidate.ocr;
+    const parsed = bestCandidate.parsed;
+    const usedRotation = bestCandidate.rotation;
+    trace('rotation:accepted', {
+      rotation: usedRotation.label,
+      parsedItems: parsed.length,
+      score: Number(bestCandidate.score.total.toFixed(2)),
+      plausibleItems: bestCandidate.score.plausibleCount
+    });
 
     const memory = await readJson(MEMORY_FILE, {});
 
