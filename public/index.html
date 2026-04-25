@@ -16,8 +16,10 @@
         <input id="receiptImage" type="file" accept="image/*" capture="environment" />
         <button id="extractBtn">Estrai righe con OCR</button>
         <p id="status" class="muted"></p>
+        <label for="ocrLiveLog">Log OCR live</label>
+        <pre id="ocrLiveLog" class="muted"></pre>
         <details id="ocrDebugDetails">
-          <summary>Debug OCR (solo quando c'è un errore)</summary>
+          <summary>Debug OCR (errori e casi con poche righe)</summary>
           <pre id="ocrDebugOutput" class="muted"></pre>
         </details>
       </section>

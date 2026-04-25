@@ -7,6 +7,7 @@ const els = {
   receiptImage: document.getElementById('receiptImage'),
   extractBtn: document.getElementById('extractBtn'),
   status: document.getElementById('status'),
+  ocrLiveLog: document.getElementById('ocrLiveLog'),
   appVersion: document.getElementById('appVersion'),
   ocrDebugDetails: document.getElementById('ocrDebugDetails'),
   ocrDebugOutput: document.getElementById('ocrDebugOutput'),
@@ -76,6 +77,20 @@ function updateSummary() {
 
 function setStatus(message) {
   els.status.textContent = message;
+}
+
+function clearOcrLiveLog() {
+  els.ocrLiveLog.textContent = '';
+}
+
+function appendOcrLiveLog(message, payload = null) {
+  const now = new Date();
+  const ts = now.toLocaleTimeString('it-IT', { hour12: false });
+  const suffix = payload ? ` ${JSON.stringify(payload)}` : '';
+  const line = `[${ts}] ${message}${suffix}`;
+  els.ocrLiveLog.textContent = els.ocrLiveLog.textContent
+    ? `${els.ocrLiveLog.textContent}\n${line}`
+    : line;
 }
 
 function setOcrDebug(debugPayload) {
@@ -180,6 +195,9 @@ async function extractReceipt() {
   form.append('receipt', file);
 
   setStatus('OCR in corso...');
+  clearOcrLiveLog();
+  appendOcrLiveLog('File selezionato', { fileName: file.name, size: file.size, type: file.type });
+  appendOcrLiveLog('Upload verso /api/ocr avviato');
   setOcrDebug(null);
 
   try {
@@ -187,7 +205,11 @@ async function extractReceipt() {
       method: 'POST',
       body: form
     });
+    appendOcrLiveLog('Risposta ricevuta dal server', { status: response.status, statusText: response.statusText });
     const data = await parseJsonResponseSafe(response);
+    if (Array.isArray(data?.timeline)) {
+      data.timeline.forEach((event) => appendOcrLiveLog(`Server: ${event.step}`, event));
+    }
 
     if (!response.ok) {
       const message = data?.error || `OCR non riuscito (HTTP ${response.status}).`;
@@ -225,6 +247,7 @@ async function extractReceipt() {
     const extra = extraParts.length > 0 ? ` (${extraParts.join(' ')})` : '';
     const hint = extractedItems.length === 0 ? ' Prova a rifare la foto più dritta e vicina agli item.' : '';
     setStatus(`Righe estratte: ${extractedItems.length}. Correggi se necessario.${extra}${hint}`);
+    appendOcrLiveLog('Parsing completato', { extractedItems: extractedItems.length });
     if (data.debug && extractedItems.length <= 1) {
       setOcrDebug({
         mode: 'low-confidence',
@@ -234,6 +257,7 @@ async function extractReceipt() {
     }
     renderItems();
   } catch (error) {
+    appendOcrLiveLog('Errore durante OCR', { message: error.message });
     setOcrDebug(error.debugPayload || { message: error.message });
     setStatus(`${error.message} Aggiungi le righe manualmente.`);
     console.error('Errore OCR:', error);

@@ -8,6 +8,7 @@ const Tesseract = require('tesseract.js');
 const sharp = require('sharp');
 const { version: appVersion } = require('./package.json');
 const { parseReceiptText } = require('./lib/receipt-parser');
+Tesseract.setLogging(false);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -85,7 +86,7 @@ function inferOwnerFromMemory(name, memory) {
   return 'both';
 }
 
-async function runOcrWithFallback(imageBuffer) {
+async function runOcrWithFallback(imageBuffer, trace = () => {}) {
   const attempts = [
     { lang: 'ita+eng', reason: 'primary' },
     { lang: 'ita', reason: 'italian fallback' },
@@ -98,9 +99,12 @@ async function runOcrWithFallback(imageBuffer) {
   const allLangs = new Set(attempts.flatMap((attempt) => attempt.lang.split('+')));
 
   for (const lang of allLangs) {
+    trace('ensure-language-data:start', { lang });
     try {
       await ensureLanguageData(lang);
+      trace('ensure-language-data:ok', { lang });
     } catch (error) {
+      trace('ensure-language-data:error', { lang, message: error?.message || 'Download lingua OCR fallito' });
       failures.push({
         lang,
         reason: 'download-language-data',
@@ -110,6 +114,7 @@ async function runOcrWithFallback(imageBuffer) {
   }
 
   for (const attempt of attempts) {
+    trace('ocr-attempt:start', { lang: attempt.lang, reason: attempt.reason });
     const attemptLangs = attempt.lang.split('+');
     const missingLangs = [];
     for (const lang of attemptLangs) {
@@ -118,6 +123,7 @@ async function runOcrWithFallback(imageBuffer) {
     }
 
     if (missingLangs.length > 0) {
+      trace('ocr-attempt:skip-missing-language', { lang: attempt.lang, missingLangs });
       failures.push({
         lang: attempt.lang,
         reason: attempt.reason,
@@ -148,6 +154,7 @@ async function runOcrWithFallback(imageBuffer) {
         usedFallback: attempt.reason !== 'primary'
       };
     } catch (error) {
+      trace('ocr-attempt:error', { lang: attempt.lang, reason: attempt.reason, message: error?.message || 'Errore OCR non specificato' });
       lastError = error;
       failures.push({
         lang: attempt.lang,
@@ -192,8 +199,25 @@ app.post('/api/ocr', upload.single('receipt'), async (req, res) => {
     return res.status(400).json({ error: 'Carica una foto dello scontrino.' });
   }
 
+  const timeline = [];
+  const trace = (step, details = {}) => {
+    timeline.push({
+      at: new Date().toISOString(),
+      step,
+      ...details
+    });
+  };
+
   try {
+    trace('request:received', {
+      fileName: req.file.originalname,
+      mimeType: req.file.mimetype,
+      byteLength: req.file.buffer.length
+    });
+
+    trace('image:sanitize:start');
     const sanitizedImage = await sanitizeImageForOcr(req.file.buffer);
+    trace('image:sanitize:ok', { byteLength: sanitizedImage.length });
     const rotationAttempts = [
       { steps: 0, label: 'originale' },
       { steps: 1, label: 'rotata 90° antiorario' },
@@ -207,15 +231,19 @@ app.post('/api/ocr', upload.single('receipt'), async (req, res) => {
     let usedRotation = rotationAttempts[0];
 
     for (const rotation of rotationAttempts) {
+      trace('rotation:start', { rotation: rotation.label });
       try {
         const candidateImage = await rotateImage90Counterclockwise(sanitizedImage, rotation.steps);
-        const candidateOcr = await runOcrWithFallback(candidateImage);
+        trace('rotation:prepared', { rotation: rotation.label, byteLength: candidateImage.length });
+        const candidateOcr = await runOcrWithFallback(candidateImage, trace);
         const candidateParsed = parseReceiptText(candidateOcr.text);
+        trace('parse:done', { rotation: rotation.label, parsedItems: candidateParsed.length });
 
         if (candidateParsed.length > 0) {
           ocrResult = candidateOcr;
           parsed = candidateParsed;
           usedRotation = rotation;
+          trace('rotation:accepted', { rotation: rotation.label, parsedItems: candidateParsed.length });
           break;
         }
 
@@ -223,18 +251,21 @@ app.post('/api/ocr', upload.single('receipt'), async (req, res) => {
           rotation: rotation.label,
           message: 'Nessuna riga articolo+prezzo riconosciuta'
         });
+        trace('rotation:empty-items', { rotation: rotation.label });
       } catch (error) {
         orientationFailures.push({
           rotation: rotation.label,
           message: error?.message || 'Errore OCR non specificato',
           failures: error?.ocrFailures || []
         });
+        trace('rotation:error', { rotation: rotation.label, message: error?.message || 'Errore OCR non specificato' });
       }
     }
 
     if (!ocrResult) {
       const error = new Error('Nessuna riga riconosciuta dopo 4 orientamenti (0°, 90°, 180°, 270°).');
       error.orientationFailures = orientationFailures;
+      error.timeline = timeline;
       throw error;
     }
 
@@ -254,6 +285,7 @@ app.post('/api/ocr', upload.single('receipt'), async (req, res) => {
         ? `OCR in fallback con lingua ${ocrResult.usedLanguage}.`
         : null,
       info: usedRotation.steps > 0 ? `OCR riuscito con immagine ${usedRotation.label}.` : null,
+      timeline,
       debug: {
         parsedItems: withSuggestions.length,
         usedRotation: usedRotation.label,
@@ -274,7 +306,8 @@ app.post('/api/ocr', upload.single('receipt'), async (req, res) => {
         message: error?.message || 'Errore OCR non specificato',
         stack: error?.stack || null,
         failures: error?.ocrFailures || [],
-        orientationFailures: error?.orientationFailures || []
+        orientationFailures: error?.orientationFailures || [],
+        timeline: error?.timeline || timeline
       }
     });
   }
