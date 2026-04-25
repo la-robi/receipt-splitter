@@ -4,7 +4,7 @@ Web app mobile-first per dividere le spese degli scontrini tra due persone.
 
 ## Obiettivo
 
-L'app Scoppia v.1 permette di caricare una foto di uno scontrino, riconoscere testo e prezzo degli item, farne una lista che l'utente può catalogare con flag R, T, Entrambi. L'app calcula quindi quanto ha speso R e quanto ha speso T tra spese personali e la metà di quelle comuni.
+L'app Scoppia v.1 permette di caricare una foto di uno scontrino, riconoscere testo e prezzo degli item, farne una lista che l'utente può catalogare con flag R, T, Entrambi. L'app calcola quindi quanto ha speso R e quanto ha speso T tra spese personali e la metà di quelle comuni.
 
 ## MVP iniziale
 
