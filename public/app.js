@@ -96,9 +96,10 @@ async function loadAppMeta() {
     if (!response.ok) {
       throw new Error('meta endpoint non disponibile');
     }
-    els.appVersion.textContent = `v${data.appVersion} · build ${data.buildId}`;
+    els.appVersion.textContent = `(${data.appVersion} · build ${data.buildId})`;
+    document.title = `Scoppia v1 (${data.appVersion})`;
   } catch (_error) {
-    els.appVersion.textContent = 'versione non disponibile';
+    els.appVersion.textContent = '(versione non disponibile)';
   }
 }
 
