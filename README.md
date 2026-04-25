@@ -45,6 +45,11 @@ Poi apri `http://localhost:3000`.
 - `GET /api/sessions`
 - `POST /api/sessions`
 
+## Configurazione OCR (deploy)
+
+- `OCR_TIMEOUT_MS` (opzionale): timeout massimo per tentativo OCR (default `45000` ms).
+- Se il caricamento dei file lingua OCR fallisce per problemi di rete del provider, l'app interrompe i fallback multipli per evitare attese lunghe e restituisce subito errore gestibile lato UI.
+
 ## Nota
 
 L'app non salva automaticamente il risultato OCR come conto definitivo: il salvataggio avviene solo quando premi **"Accetta conto e salva"**.
