@@ -8,7 +8,8 @@
     "dev": "node server.js",
     "test:receipt-parser": "node scripts/test-receipt-parser.js",
     "test:client-id-fallback": "node scripts/test-client-id-fallback.js",
-    "test": "npm run test:receipt-parser && npm run test:client-id-fallback"
+    "test": "npm run test:receipt-parser && npm run test:client-id-fallback && npm run test:ocr-scontrino",
+    "test:ocr-scontrino": "node scripts/test-ocr-scontrino.js"
   },
   "dependencies": {
     "express": "^4.19.2",
