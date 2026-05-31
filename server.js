@@ -11,6 +11,36 @@ const { version: appVersion } = require('./package.json');
 const { parseReceiptText } = require('./lib/receipt-parser');
 Tesseract.setLogging(false);
 
+
+const TESSERACT_NOISE_PATTERNS = [
+  /Image too small to scale/i,
+  /Line cannot be recognized/i,
+  /failed to load .*\.special-words/i
+];
+
+function isTesseractNoise(args) {
+  const message = args.map((arg) => (typeof arg === 'string' ? arg : String(arg))).join(' ');
+  return TESSERACT_NOISE_PATTERNS.some((pattern) => pattern.test(message));
+}
+
+async function runWithQuietTesseractLogs(task) {
+  const originalError = console.error;
+  const originalWarn = console.warn;
+  console.error = (...args) => {
+    if (!isTesseractNoise(args)) originalError(...args);
+  };
+  console.warn = (...args) => {
+    if (!isTesseractNoise(args)) originalWarn(...args);
+  };
+
+  try {
+    return await task();
+  } finally {
+    console.error = originalError;
+    console.warn = originalWarn;
+  }
+}
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 const upload = multer({ storage: multer.memoryStorage() });
@@ -182,10 +212,10 @@ async function runOcrWithFallback(imageBuffer, trace = () => {}, options = {}) {
     }
 
     try {
-      const result = await Promise.race([
+      const result = await runWithQuietTesseractLogs(() => Promise.race([
         Tesseract.recognize(imageBuffer, attempt.lang, {
           logger: () => {},
-          tessedit_pageseg_mode: '6',
+          tessedit_pageseg_mode: process.env.OCR_TESSERACT_PSM || '6',
           tessedit_ocr_engine_mode: '1',
           preserve_interword_spaces: '1',
           load_system_dawg: '0',
@@ -201,7 +231,7 @@ async function runOcrWithFallback(imageBuffer, trace = () => {}, options = {}) {
         new Promise((_, reject) => {
           setTimeout(() => reject(new Error(`OCR timeout (${timeoutMs}ms) on ${attempt.lang}`)), timeoutMs);
         })
-      ]);
+      ]));
 
       return {
         text: result.data.text,
@@ -242,7 +272,7 @@ async function sanitizeImageForOcr(imageBuffer) {
     const image = await Jimp.read(imageBuffer);
     image
       .greyscale()
-      .contrast(0.25)
+      .contrast(Number(process.env.OCR_IMAGE_CONTRAST || 0.55))
       .normalize();
     return image.getBufferAsync(Jimp.MIME_PNG);
   } catch (error) {
@@ -311,6 +341,12 @@ app.post('/api/ocr', upload.single('receipt'), async (req, res) => {
       };
     };
 
+    const shouldAcceptEarly = (rotation, parsed, score) => (
+      rotation.steps === 0
+      && score.plausibleCount >= Number(process.env.OCR_EARLY_ACCEPT_MIN_ITEMS || 10)
+      && parsed.length >= Number(process.env.OCR_EARLY_ACCEPT_MIN_ITEMS || 10)
+    );
+
     for (const rotation of rotationAttempts) {
       if (!hasBudget()) {
         trace('rotation:skipped-time-budget', { rotation: rotation.label });
@@ -357,6 +393,16 @@ app.post('/api/ocr', upload.single('receipt'), async (req, res) => {
             parsedItems: candidateParsed.length,
             plausibleItems: candidateScore.plausibleCount
           });
+        }
+
+        if (shouldAcceptEarly(rotation, candidateParsed, candidateScore)) {
+          trace('rotation:early-accepted', {
+            rotation: rotation.label,
+            parsedItems: candidateParsed.length,
+            plausibleItems: candidateScore.plausibleCount,
+            reason: 'Orientamento originale già abbastanza affidabile; salto OCR sulle rotazioni lente.'
+          });
+          break;
         }
 
         orientationFailures.push({

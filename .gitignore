@@ -1,3 +1,6 @@
 node_modules/
 .DS_Store
 npm-debug.log*
+data/*.jpg
+data/*.jpeg
+data/*.png

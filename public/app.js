@@ -3,6 +3,19 @@ const state = {
   loading: false
 };
 
+let fallbackItemIdCounter = 0;
+
+function createItemId() {
+  if (globalThis.crypto && typeof globalThis.crypto.randomUUID === 'function') {
+    return globalThis.crypto.randomUUID();
+  }
+
+  fallbackItemIdCounter += 1;
+  const timestamp = Date.now().toString(36);
+  const randomPart = Math.random().toString(36).slice(2, 10) || 'manual';
+  return `item-${timestamp}-${fallbackItemIdCounter.toString(36)}-${randomPart}`;
+}
+
 const els = {
   receiptImage: document.getElementById('receiptImage'),
   extractBtn: document.getElementById('extractBtn'),
@@ -176,7 +189,7 @@ function renderItems() {
 
 function addEmptyItem() {
   state.items.push({
-    id: crypto.randomUUID(),
+    id: createItemId(),
     name: '',
     price: 0,
     owner: 'both'
@@ -240,8 +253,8 @@ async function extractReceipt() {
     const extractedItems = Array.isArray(data.items) ? data.items : [];
 
     state.items = extractedItems.length
-      ? extractedItems.map((it) => ({ ...it, id: crypto.randomUUID() }))
-      : [{ id: crypto.randomUUID(), name: '', price: 0, owner: 'both' }];
+      ? extractedItems.map((it) => ({ ...it, id: createItemId() }))
+      : [{ id: createItemId(), name: '', price: 0, owner: 'both' }];
 
     const extraParts = [data.warning, data.info].filter(Boolean);
     const extra = extraParts.length > 0 ? ` (${extraParts.join(' ')})` : '';
